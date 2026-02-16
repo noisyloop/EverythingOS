@@ -28,14 +28,18 @@ From chatbots to robot swarms — build autonomous agent systems that work with 
 | Memory System | ✅ Working |
 | Security (Auth, Rate Limiting, Audit) | ✅ Working |
 | Observability (Metrics) | ✅ Working |
+| CLI Wizard | ✅ Working |
+| Robot Simulation | ✅ Working |
+| UAP Swarm Simulation | ✅ Working |
+| Discord Integration (Secure) | ✅ Working |
 | Hardware Abstraction | ✅ Ready (needs hardware) |
 | Raspberry Pi Platform | ✅ Ready (needs hardware) |
 | Jetson Platform | ✅ Ready (needs hardware) |
 | ROS2 Bridge | ✅ Ready (needs ROS2) |
 | Swarm Coordination | ✅ Ready (needs multiple nodes) |
 | REST API | 🔧 In Progress |
+| Telegram Integration | 🔧 In Progress |
 | Web Dashboard | 📋 Planned |
-| Tests | 📋 Planned |
 
 ## Quick Start
 
@@ -47,23 +51,46 @@ git clone https://github.com/m0rs3c0d3/EverythingOS.git
 cd EverythingOS
 npm install
 
-# Run the demo
+# Run the CLI wizard
+npm run cli
+
+# Or run demos directly
 npm run demo
 ```
 
-You should see:
+## CLI Wizard
+
+The fastest way to get started:
+
+```bash
+npm run cli
+```
+
+```
+  What would you like to do?
+
+  1) 🚀 Quick Start — Deploy a Discord bot in 60 seconds
+  2) 🤖 Create Agent — Scaffold a custom agent
+  3) 🛸 Run Simulation — Launch UAP swarm demo
+  4) ⚙️  Configure — Set up LLM providers & settings
+  5) 📊 Dashboard — Open web dashboard
+  6) 📖 Documentation — Open docs in browser
+```
+
+## Demos
+
+### Simple Agent Demo
+
+```bash
+npm run demo
+```
+
 ```
 EverythingOS Demo Starting...
-
 ▶  STARTED clock
 ▶  STARTED health-monitor
-
-Running! Press Ctrl+C to stop.
-
 ⏱  TICK #1
-⏱  TICK #2
 💚 HEALTH: healthy
-⏱  TICK #3
 ```
 
 ### Interactive CLI
@@ -78,6 +105,65 @@ npm run demo:cli
 | `e` | Emit test event |
 | `q` | Quit |
 
+### Robot Simulation
+
+Control a virtual robot in a 2D world:
+
+```bash
+npm run sim
+```
+
+| Key | Action |
+|-----|--------|
+| `w/a/s/d` | Move |
+| `g` | Go to goal |
+| `p` | Start patrol |
+| `m` | Show map |
+| `q` | Quit |
+
+### UAP Swarm Simulation
+
+Control a fleet of 5 autonomous UAPs:
+
+```bash
+npm run swarm
+```
+
+| Key | Action |
+|-----|--------|
+| `1-5` | Formations (line, V, diamond, circle, sphere) |
+| `p` | Start patrol |
+| `s` | Scatter |
+| `c` | Converge |
+| `i` | Intercept target |
+| `q` | Quit |
+
+## Discord Bot (Secure)
+
+Deploy a secure Discord bot with defense-in-depth protection:
+
+```bash
+# Set your tokens
+export DISCORD_BOT_TOKEN=your_token
+export ANTHROPIC_API_KEY=your_key  # or OPENAI_API_KEY
+
+# Start
+npm run discord
+```
+
+### Security Features
+
+| Protection | Description |
+|------------|-------------|
+| Prompt Injection Detection | 20+ patterns detected and blocked |
+| Rate Limiting | 10/min per user, 30/min per channel |
+| DMs Disabled | Primary abuse vector blocked by default |
+| PII Detection | SSN, credit cards, emails flagged |
+| Abuse Scoring | Auto-block repeat offenders |
+| Output Sanitization | Strips leaked system prompts |
+| Hardened System Prompt | Jailbreak-resistant instructions |
+| Audit Logging | Hashed user IDs, no PII stored |
+
 ## What is EverythingOS?
 
 EverythingOS is a TypeScript framework for building autonomous AI agents that work together. Think of it as an operating system where instead of running programs, you run intelligent agents.
@@ -88,6 +174,7 @@ EverythingOS is a TypeScript framework for building autonomous AI agents that wo
 - **Agent Lifecycle** — Built-in supervision, health monitoring, automatic recovery
 - **Three-Layer Memory** — Working, episodic, and long-term memory for learning
 - **Hardware Ready** — Direct integration with Raspberry Pi, Jetson, ROS2
+- **Secure by Default** — Rate limiting, injection detection, audit logging
 
 **Design Philosophy:**
 > Most agent frameworks assume the world is safe, fast, and reversible. EverythingOS assumes the opposite.
@@ -150,8 +237,11 @@ class MyAgent extends Agent {
 │                             AGENTS                                   │
 │     Perception │ Analysis │ Decision │ Execution │ Learning          │
 ├─────────────────────────────────────────────────────────────────────┤
-│                            PLUGINS                                   │
-│              Discord │ Slack │ GitHub │ Hardware                     │
+│                         INTEGRATIONS                                 │
+│                    Discord │ Telegram │ Slack                        │
+├─────────────────────────────────────────────────────────────────────┤
+│                          SIMULATION                                  │
+│               Robot │ UAP Swarm │ Sensor Networks                    │
 ├─────────────────────────────────────────────────────────────────────┤
 │                      ROBOTICS LAYER                                  │
 │         ROS2 Bridge │ Motion Control │ Safety Monitor                │
@@ -159,89 +249,6 @@ class MyAgent extends Agent {
 │                       HARDWARE LAYER                                 │
 │     Raspberry Pi │ Jetson │ Sensors │ Actuators │ Protocols          │
 └─────────────────────────────────────────────────────────────────────┘
-```
-
-## Core Concepts
-
-### Event Bus
-
-```typescript
-import { eventBus } from 'everythingos';
-
-// Subscribe (supports wildcards)
-eventBus.on('user:*', (event) => console.log(event));
-
-// Emit
-eventBus.emit('user:login', { userId: '123' });
-
-// Request-response
-const result = await eventBus.request('data:fetch', { id: 123 });
-```
-
-### Memory System
-
-```typescript
-import { memoryService } from 'everythingos';
-
-const memory = memoryService.forAgent('my-agent');
-
-// Working memory (short-term)
-memory.working.set('currentTask', { status: 'active' });
-
-// Long-term memory
-await memory.remember({
-  content: 'User prefers dark mode',
-  type: 'preference',
-  importance: 0.8,
-});
-
-// Recall
-const memories = await memory.recall('user preferences');
-```
-
-### Security
-
-```typescript
-import { security } from 'everythingos';
-
-// Execute with full security checks
-await security.executeSecurely({
-  actor: 'agent:my-agent',
-  action: 'send:email',
-  permission: 'email:send',
-  rateKey: 'my-agent',
-  execute: async () => {
-    // Your code here
-  },
-});
-```
-
-## Hardware Integration
-
-### Raspberry Pi
-
-```typescript
-import { RaspberryPiPlatform } from 'everythingos';
-
-const pi = new RaspberryPiPlatform({ gpioLibrary: 'pigpio' });
-await pi.initialize();
-
-// Blink an LED
-await pi.setupPin(17, 'output');
-await pi.digitalWrite(17, 1);
-```
-
-### Sensors & Actuators
-
-```typescript
-import { IMUSensor, ServoActuator } from 'everythingos';
-
-const imu = new IMUSensor({ chip: 'MPU6050', i2cAddress: 0x68 });
-await imu.initialize();
-imu.on('data', (d) => console.log(d.accel));
-
-const servo = new ServoActuator({ pin: 18 });
-await servo.setAngle(90);
 ```
 
 ## Project Structure
@@ -254,19 +261,28 @@ src/
 ├── security/       # Auth, Rate Limiting, Audit
 ├── observability/  # Metrics
 ├── agents/         # Foundation + Decision agents
+├── integrations/   # Discord, Telegram (secure)
+├── simulation/     # Robot, UAP, Swarm simulations
 ├── plugins/
 │   ├── hardware/   # Sensors, Actuators, Protocols
 │   ├── platforms/  # Pi, Jetson, Deployment
 │   ├── robotics/   # ROS2, Motion, Safety
 │   └── swarm/      # Coordination, Mesh, Formation
 └── api/            # REST server
+
+cli/                # Interactive CLI wizard
+examples/           # Demo scripts
 ```
 
 ## Scripts
 
 ```bash
+npm run cli         # Interactive wizard
 npm run demo        # Simple demo
-npm run demo:cli    # Interactive CLI
+npm run demo:cli    # Interactive agent demo
+npm run sim         # Robot simulation
+npm run swarm       # UAP swarm simulation
+npm run discord     # Secure Discord bot
 npm run build       # Compile TypeScript
 npm run test        # Run tests
 npm run api         # Start REST API server
@@ -274,14 +290,19 @@ npm run api         # Start REST API server
 
 ## Environment Variables
 
+Copy `.env.example` to `.env` and fill in your values:
+
 ```bash
-# LLM Providers
-OPENAI_API_KEY=sk-...
+# Discord Bot
+DISCORD_BOT_TOKEN=your_token
+
+# LLM Providers (set at least one)
 ANTHROPIC_API_KEY=sk-ant-...
+OPENAI_API_KEY=sk-...
 GOOGLE_API_KEY=...
 
-# Integrations
-DISCORD_BOT_TOKEN=...
+# Ollama (local, no key needed)
+OLLAMA_BASE_URL=http://localhost:11434
 
 # System
 PORT=3000
@@ -297,14 +318,18 @@ LOG_LEVEL=info
 - [x] Hardware abstraction layer
 - [x] ROS2 bridge
 - [x] Swarm coordination
+- [x] CLI wizard
+- [x] Robot simulation
+- [x] UAP swarm simulation
+- [x] Secure Discord integration
+- [ ] Telegram integration
+- [ ] WhatsApp integration
 - [ ] Comprehensive test suite
 - [ ] Web dashboard
 - [ ] Docker deployment
 - [ ] Example robots
 
 ## Documentation
-
-For detailed documentation on all features, see:
 
 - [Hardware Setup Guide](HARDWARE.md) — Raspberry Pi setup and parts list
 - [Bridge Architecture](BRIDGES.md) — How EverythingOS connects to physical systems
