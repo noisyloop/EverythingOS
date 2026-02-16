@@ -1,3 +1,6 @@
+#!/usr/bin/env npx tsx
+// EVERYTHINGOS - Simple Demo
+
 import { eventBus, agentRegistry, ClockAgent, HealthMonitorAgent } from '../src';
 
 console.log('EverythingOS Demo Starting...\n');
@@ -8,17 +11,32 @@ const health = new HealthMonitorAgent({ tickRate: 5000 });
 agentRegistry.register(clock);
 agentRegistry.register(health);
 
-eventBus.on('world:tick', (e) => {
-  const p = e.payload as any;
-  console.log(`⏱  TICK #${p.tick}`);
+let tickCount = 0;
+
+eventBus.on('world:tick', () => {
+  tickCount++;
+  console.log(`⏱  TICK #${tickCount}`);
 });
 
 eventBus.on('health:report', (e) => {
-  const p = e.payload as any;
-  console.log(`💚 HEALTH: ${p.status}`);
+  const { status } = e.payload as { status: string };
+  console.log(`💚 HEALTH: ${status}`);
+});
+
+eventBus.on('agent:started', (e) => {
+  const { agentId } = e.payload as { agentId: string };
+  console.log(`▶  STARTED ${agentId}`);
 });
 
 await clock.start();
 await health.start();
 
-console.log('Running! Press Ctrl+C to stop.\n');
+console.log('\nRunning! Press Ctrl+C to stop.\n');
+
+process.on('SIGINT', async () => {
+  console.log('\nShutting down...');
+  await clock.stop();
+  await health.stop();
+  console.log('Goodbye!');
+  process.exit(0);
+});

@@ -1,4 +1,4 @@
-#!/usr/bin/env npx ts-node
+#!/usr/bin/env npx tsx
 // EVERYTHINGOS - Interactive CLI Demo
 
 import { eventBus, agentRegistry, ClockAgent, HealthMonitorAgent } from '../src';

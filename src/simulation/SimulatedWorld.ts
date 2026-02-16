@@ -46,21 +46,18 @@ export class SimulatedWorld {
     this.width = config.width;
     this.height = config.height;
 
-    // Add obstacles
     if (config.obstacles) {
       for (const obs of config.obstacles) {
         this.obstacles.set(obs.id, obs);
       }
     }
 
-    // Add zones
     if (config.zones) {
       for (const zone of config.zones) {
         this.zones.set(zone.id, zone);
       }
     }
 
-    // Default boundary warning zone
     this.zones.set('boundary-warning', {
       id: 'boundary-warning',
       type: 'warning',
@@ -75,10 +72,6 @@ export class SimulatedWorld {
     });
   }
 
-  // ─────────────────────────────────────────────────────────────────────────────
-  // Entity Management
-  // ─────────────────────────────────────────────────────────────────────────────
-
   registerEntity(id: string, position: Position): void {
     this.entities.set(id, { ...position });
     eventBus.emit('world:entity:registered', { id, position });
@@ -90,14 +83,12 @@ export class SimulatedWorld {
     collision?: Obstacle;
     zone?: Zone;
   } {
-    // Check bounds
     if (position.x < 0 || position.x > this.width ||
         position.y < 0 || position.y > this.height) {
       eventBus.emit('world:collision:boundary', { entityId: id, position });
       return { allowed: false, reason: 'out_of_bounds' };
     }
 
-    // Check obstacle collisions
     for (const [obsId, obs] of this.obstacles) {
       const distance = this.distance(position, obs.position);
       if (distance < obs.radius) {
@@ -106,10 +97,8 @@ export class SimulatedWorld {
       }
     }
 
-    // Update position
     this.entities.set(id, { ...position });
 
-    // Check zones
     const currentZone = this.getZoneAt(position);
     if (currentZone) {
       eventBus.emit('world:zone:entered', { entityId: id, zone: currentZone, position });
@@ -130,10 +119,6 @@ export class SimulatedWorld {
     return this.entities.get(id);
   }
 
-  // ─────────────────────────────────────────────────────────────────────────────
-  // Obstacle Management
-  // ─────────────────────────────────────────────────────────────────────────────
-
   addObstacle(obstacle: Obstacle): void {
     this.obstacles.set(obstacle.id, obstacle);
     eventBus.emit('world:obstacle:added', obstacle);
@@ -148,10 +133,6 @@ export class SimulatedWorld {
     return Array.from(this.obstacles.values());
   }
 
-  // ─────────────────────────────────────────────────────────────────────────────
-  // Zone Management
-  // ─────────────────────────────────────────────────────────────────────────────
-
   addZone(zone: Zone): void {
     this.zones.set(zone.id, zone);
     eventBus.emit('world:zone:added', zone);
@@ -161,7 +142,6 @@ export class SimulatedWorld {
     for (const zone of this.zones.values()) {
       if (position.x >= zone.bounds.minX && position.x <= zone.bounds.maxX &&
           position.y >= zone.bounds.minY && position.y <= zone.bounds.maxY) {
-        // Return most specific zone (danger > warning > safe > goal)
         return zone;
       }
     }
@@ -171,10 +151,6 @@ export class SimulatedWorld {
   getZones(): Zone[] {
     return Array.from(this.zones.values());
   }
-
-  // ─────────────────────────────────────────────────────────────────────────────
-  // Queries
-  // ─────────────────────────────────────────────────────────────────────────────
 
   isValidPosition(position: Position): boolean {
     if (position.x < 0 || position.x > this.width ||
@@ -191,30 +167,6 @@ export class SimulatedWorld {
     return true;
   }
 
-  findPath(from: Position, to: Position): Position[] {
-    // Simple direct path (can be replaced with A* later)
-    const path: Position[] = [from];
-    const steps = 10;
-    
-    for (let i = 1; i <= steps; i++) {
-      const t = i / steps;
-      const point = {
-        x: from.x + (to.x - from.x) * t,
-        y: from.y + (to.y - from.y) * t,
-      };
-      
-      if (this.isValidPosition(point)) {
-        path.push(point);
-      } else {
-        // Path blocked
-        eventBus.emit('world:path:blocked', { from, to, blockedAt: point });
-        break;
-      }
-    }
-    
-    return path;
-  }
-
   distanceToNearestObstacle(position: Position): number {
     let minDistance = Infinity;
     
@@ -225,7 +177,6 @@ export class SimulatedWorld {
       }
     }
     
-    // Also check boundaries
     const boundaryDistances = [
       position.x,
       this.width - position.x,
@@ -242,10 +193,6 @@ export class SimulatedWorld {
     return minDistance;
   }
 
-  // ─────────────────────────────────────────────────────────────────────────────
-  // Utilities
-  // ─────────────────────────────────────────────────────────────────────────────
-
   private distance(a: Position, b: Position): number {
     return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2);
   }
@@ -260,14 +207,12 @@ export class SimulatedWorld {
     };
   }
 
-  // ASCII visualization
   render(): string {
-    const scale = 2; // Each cell = 0.5 units
+    const scale = 2;
     const cols = Math.floor(this.width * scale);
     const rows = Math.floor(this.height * scale);
     const grid: string[][] = [];
 
-    // Initialize empty grid
     for (let y = 0; y < rows; y++) {
       grid[y] = [];
       for (let x = 0; x < cols; x++) {
@@ -275,7 +220,6 @@ export class SimulatedWorld {
       }
     }
 
-    // Draw obstacles
     for (const obs of this.obstacles.values()) {
       const ox = Math.floor(obs.position.x * scale);
       const oy = Math.floor(obs.position.y * scale);
@@ -284,7 +228,6 @@ export class SimulatedWorld {
       }
     }
 
-    // Draw entities (robots)
     for (const [id, pos] of this.entities) {
       const ex = Math.floor(pos.x * scale);
       const ey = Math.floor(pos.y * scale);
@@ -293,7 +236,6 @@ export class SimulatedWorld {
       }
     }
 
-    // Build string
     const border = '─'.repeat(cols + 2);
     let output = `┌${border}┐\n`;
     for (const row of grid) {
