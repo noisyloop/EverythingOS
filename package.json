@@ -13,6 +13,7 @@
     "demo": "tsx examples/demo-simple.ts",
     "demo:cli": "tsx examples/demo-cli.ts",
     "sim": "tsx examples/demo-robot.ts",
+    "swarm": "tsx examples/demo-swarm.ts",
     "test": "vitest",
     "test:run": "vitest run",
     "lint": "eslint src --ext .ts"

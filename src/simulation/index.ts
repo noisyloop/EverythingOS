@@ -6,3 +6,5 @@
 export * from './SimulatedWorld';
 export * from './SimulatedRobot';
 export * from './RobotAgent';
+export * from './SimulatedUAP';
+export * from './UAPSwarmController';
