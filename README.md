@@ -19,78 +19,100 @@
 
 From chatbots to robot swarms — build autonomous agent systems that work with any LLM provider.
 
+Built on TypeScript with a security-first design aligned to **NIST AI RMF 1.0** and **NIST AI 600-1**.
+
+## Requirements
+
+- Node.js >= 20.20.0
+- npm >= 10.0.0
+
 ## Quick Start
 
 ```bash
 git clone https://github.com/m0rs3c0d3/EverythingOS.git
 cd EverythingOS
 npm install
-npm run cli
+cp .env.example .env   # add your API keys
+npm run build
+npm start
 ```
 
-## What's New
+## Key Features
 
-### 🚀 CLI Wizard
-Interactive setup that actually works:
+### LLM-Agnostic Runtime
+
+Plug in any provider without changing agent code:
+
+| Provider | Status |
+|----------|--------|
+| Anthropic (Claude) | Supported |
+| OpenAI (GPT) | Supported |
+| Google (Gemini) | Supported |
+| Local / Self-hosted | Supported |
+
+### EventBus-Driven Architecture
+
+Agents communicate through a typed, ACL-enforced event bus. Every message carries an `agentId` and timestamp. Priority queuing and dead-letter handling are built in.
+
+### Agent Risk Tiers
+
+Agents declare a risk tier at registration. Controls are automatically enforced:
+
+- **LOW** — Fully autonomous (clock agents, monitors, simulations)
+- **MEDIUM** — Supervised autonomous with input/output filtering (Discord bots, API integrations)
+- **HIGH** — Human-in-the-loop required via `ApprovalGateAgent` (trading, robotics, deployments)
+
+### Security Layer
+
+- Prompt injection detection and input sanitization
+- PII scrubbing before all outbound LLM calls
+- Agent HMAC token authentication
+- EventBus ACL enforcement (agents cannot publish outside declared channels)
+- Append-only, hash-chained audit log
+- LLM output content filtering
+- Rate limiting
+
+### REST API
+
 ```bash
-npm run cli
-```
-- Deploy a Discord bot in 60 seconds
-- Create custom agents from templates
-- Configure LLM providers
-- Launch simulations
-
-### Secure Discord Bot
-Production-ready Discord integration with defense-in-depth security:
-```bash
-export DISCORD_BOT_TOKEN=your_token
-export ANTHROPIC_API_KEY=your_key
-npm run discord
+npm run api   # starts Express server on :3000
 ```
 
-**Security features:**
-- Prompt injection detection (20+ patterns)
-- Rate limiting (10/min per user)
-- DMs disabled by default
-- PII detection
-- Abuse scoring with auto-block
-- Hardened system prompts
+Key endpoints:
+- `GET /api/agents` — list registered agents
+- `POST /api/agents/:id/stop` — stop an agent
+- `POST /api/agents/stop-all` — emergency stop all agents
+- `GET /api/decisions/:id/explain` — human-readable decision explanation
+- `GET /api/compliance/status` — compliance status report
 
-### UFO Simulations
+### Simulations
+
 Test without hardware:
 
 ```bash
-# Robot in 2D world
-npm run sim
-
-# UAP swarm with formations
-npm run swarm
+# Run examples directly with tsx
+npx tsx examples/demo-simple.ts     # Simple agent demo
+npx tsx examples/demo-robot.ts      # Robot in 2D world
+npx tsx examples/demo-swarm.ts      # UAP swarm with formations
+npx tsx examples/demo-cli.ts        # Interactive agent demo
+npx tsx examples/discord-bot.ts     # Discord bot (requires token)
+npx tsx examples/compliant-agents.ts  # NIST-compliant agent setup
 ```
 
-## Status
-
-| Component | Status |
-|-----------|--------|
-| Core (EventBus, Agents, State) | ✅ Working |
-| CLI Wizard | ✅ Working |
-| Discord Bot (Secure) | ✅ Working |
-| Robot Simulation | ✅ Working |
-| UAP Swarm Simulation | ✅ Working |
-| Memory System | ✅ Working |
-| Security Layer | ✅ Working |
-| Hardware Abstraction | ✅ Ready (needs hardware) |
-| Telegram Integration | 🔧 In Progress |
-| Web Dashboard | 📋 Planned |
-
-## Commands
+## Available Scripts
 
 ```bash
-npm run cli         # Interactive wizard
-npm run discord     # Discord bot
-npm run sim         # Robot simulation
-npm run swarm       # UAP swarm simulation
-npm run demo        # Simple agent demo
-npm run demo:cli    # Interactive agent demo
+npm run build          # Compile TypeScript
+npm start              # Run compiled output
+npm run api            # Start REST API server
+npm run dev            # Watch mode (tsx)
+npm test               # Run test suite
+npm run test:security  # Run security-specific tests
+npm run lint           # ESLint
+npm run typecheck      # Type check without emit
+npm run audit:check    # npm audit (high severity)
+npm run sbom           # Generate Software Bill of Materials
+npm run compliance     # Query compliance status (API must be running)
 ```
 
 ## Environment Variables
@@ -98,32 +120,69 @@ npm run demo:cli    # Interactive agent demo
 Copy `.env.example` to `.env`:
 
 ```bash
-DISCORD_BOT_TOKEN=your_token
+# LLM Providers (add one or more)
 ANTHROPIC_API_KEY=your_key
-# or
 OPENAI_API_KEY=your_key
+GEMINI_API_KEY=your_key
+
+# Integrations
+DISCORD_BOT_TOKEN=your_token
 ```
 
 ## Project Structure
 
 ```
 src/
-├── core/           # EventBus, State, Registry
-├── runtime/        # Agent base class, LLM Router
-├── agents/         # Built-in agents
-├── integrations/   # Discord (secure), Telegram (soon)
-├── simulation/     # Robot, UAP, Swarm
-├── security/       # Auth, Rate Limiting
-└── plugins/        # Hardware, Robotics
+├── core/           # EventBus, WorldState, AgentRegistry, Supervisor, Workflows
+├── runtime/        # Agent base class, LLMRouter, ActionTypes, IntentContract
+├── agents/         # Built-in agents (Clock, HealthMonitor, Shutdown, ApprovalGate, CVEWatch)
+├── api/            # Express REST API server and compliance endpoints
+├── config/         # System configuration
+├── integrations/   # Discord (secure), Telegram (in progress)
+├── observability/  # MetricsCollector
+├── security/       # Sanitize, AgentAuth, AuditLog, ContentFilter, HTTP/WS guards
+├── services/       # Memory, Trust, Tools, Explainability, Capabilities
+├── simulation/     # Robot, UAP, Swarm simulation
+├── plugins/        # Hardware abstraction layer
+├── types/          # Shared TypeScript types
+└── workflows/      # Workflow definitions (SocialReply, etc.)
 
-cli/                # Interactive wizard
-examples/           # Demo scripts
+cli/                # CLI entry point
+examples/           # Runnable demo scripts
 ```
+
+## Status
+
+| Component | Status |
+|-----------|--------|
+| Core (EventBus, State, Registry, Supervisor) | Working |
+| REST API Server | Working |
+| LLM Router (Claude, OpenAI, Gemini, Local) | Working |
+| Security Layer | Working |
+| Audit Logging (append-only, hash-chained) | Working |
+| Decision Explainability | Working |
+| Memory System | Working |
+| Observability / Metrics | Working |
+| Discord Bot (Secure) | Working |
+| Robot Simulation | Working |
+| UAP Swarm Simulation | Working |
+| Hardware Abstraction | Ready (needs hardware) |
+| Telegram Integration | In Progress |
+| ROS2 Bridge | Planned (Phase 5) |
+| Swarm Coordination (distributed) | Planned (Phase 6) |
+| Web Dashboard | Planned |
 
 ## Documentation
 
-- [Hardware Setup](HARDWARE.md)
+- [Security Policy](SECURITY.md)
 - [Bridge Architecture](BRIDGES.md)
+- [AI Ethics & Trustworthiness](AI_ETHICS.md)
+- [AI Usage Policy](AI_USAGE_POLICY.md)
+- [Incident Response Runbook](INCIDENT_RESPONSE.md)
+
+## NIST AI RMF Alignment
+
+EverythingOS is designed in alignment with **NIST AI RMF 1.0** (GOVERN, MAP, MEASURE, MANAGE) and **NIST AI 600-1** (Generative AI Profile). See [AI_ETHICS.md](AI_ETHICS.md) for how each trustworthiness characteristic is operationalized, and [AI_USAGE_POLICY.md](AI_USAGE_POLICY.md) for deployment obligations by risk tier.
 
 ## License
 
