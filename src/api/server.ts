@@ -15,6 +15,8 @@ import { pluginTrustManager, TrustLevel } from '../services/trust';
 import { AuditLogger } from '../security/audit-log';
 import { DecisionLedger } from '../security/decision-ledger';
 import { QuarantineManager } from '../security/quarantine';
+import { ModelGuard } from '../security/model-guard';
+import { llmRouter } from '../runtime/LLMRouter';
 
 // Simple HTTP server without Express dependency for now
 import { createServer, IncomingMessage, ServerResponse } from 'http';
@@ -56,7 +58,9 @@ function initializeSecurity(): void {
     metadata: { component: 'security-bootstrap', version: process.env.EOS_POLICY_VERSION || '1.0.0' },
   });
 
-  console.log('🔒 Security subsystems initialized (audit-log, decision-ledger, quarantine)');
+  ModelGuard.wrapRouter(llmRouter);
+
+  console.log('🔒 Security subsystems initialized (audit-log, decision-ledger, quarantine, model-guard)');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

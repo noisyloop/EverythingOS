@@ -24,3 +24,11 @@ export type {
   AuditEntry,
   AuditConfig,
 } from './SecurityManager';
+
+// Model Guard — approved model allowlist + behavioral fingerprinting
+export { ModelGuard } from './model-guard';
+export type {
+  FingerprintResult,
+  FingerprintRecord,
+  ModelGuardViolation,
+} from './model-guard';
