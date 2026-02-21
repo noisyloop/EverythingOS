@@ -41,7 +41,7 @@
     "tsx": "^4.16.2",
     "typescript": "^5.5.4",
     "eslint": "^9.7.0",
-    "@cyclonedx/cyclonedx-npm": "^1.19.3"
+    "@cyclonedx/cyclonedx-npm": "^4.1.2"
   },
   "jest": {
     "preset": "ts-jest",
