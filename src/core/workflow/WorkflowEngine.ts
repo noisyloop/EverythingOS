@@ -93,8 +93,8 @@ export class WorkflowEngine {
 
     try {
       const handler = this.getHandler(node);
-      if (!handler) {
-        throw new Error(`No handler for node type: ${node.type}`);
+      if (!handler || typeof handler !== 'function') {
+        throw new Error(`No valid handler for node type: ${node.type}`);
       }
 
       const result = await this.executeWithTimeout(handler, node, context, node.timeout);
@@ -157,10 +157,20 @@ export class WorkflowEngine {
   }
 
   private getHandler(node: WorkflowNode): NodeHandler | undefined {
+    let handler: NodeHandler | undefined;
+
     if (node.plugin && node.action) {
-      return this.handlers.get(`${node.plugin}:${node.action}`);
+      handler = this.handlers.get(`${node.plugin}:${node.action}`);
+    } else {
+      handler = this.handlers.get(node.type);
     }
-    return this.handlers.get(node.type);
+
+    // Extra runtime safety: ensure the retrieved value is actually a function
+    if (handler && typeof handler !== 'function') {
+      return undefined;
+    }
+
+    return handler;
   }
 
   private getNextNodes(
