@@ -1,0 +1,207 @@
+name: Security Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly full run — Monday 2am UTC
+    - cron: '0 2 * * 1'
+
+jobs:
+  # ── 1. Node version gate ───────────────────────────────────────────────────
+  node-version-check:
+    name: Node Version Gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read .nvmrc
+        id: nvmrc
+        run: echo "version=$(cat .nvmrc)" >> $GITHUB_OUTPUT
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.nvmrc.outputs.version }}
+      - name: Verify Node meets CVE floor (>=22.22.0)
+        run: |
+          NODE_VER=$(node -e "const v=process.versions.node.split('.').map(Number);process.exit(v[0]>22||(v[0]===22&&v[1]>22)||(v[0]===22&&v[1]===22&&v[2]>=0)?0:1)")
+          echo "Node version: $(node --version)"
+
+  # ── 2. Dependency audit ────────────────────────────────────────────────────
+  dependency-audit:
+    name: Dependency Audit (npm audit)
+    runs-on: ubuntu-latest
+    needs: node-version-check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - run: npm ci
+      - name: Run npm audit (high+critical)
+        run: npm audit --audit-level=high
+      - name: Run npm audit (full JSON report)
+        if: always()
+        run: npm audit --json > audit-report.json || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: npm-audit-report
+          path: audit-report.json
+          retention-days: 90
+
+  # ── 3. TypeScript type check ───────────────────────────────────────────────
+  typecheck:
+    name: TypeScript Type Check
+    runs-on: ubuntu-latest
+    needs: node-version-check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - run: npm ci
+      - run: npm run typecheck
+
+  # ── 4. Security test suite ─────────────────────────────────────────────────
+  security-tests:
+    name: Security Test Suite
+    runs-on: ubuntu-latest
+    needs: [dependency-audit, typecheck]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - run: npm ci
+      - name: Run prompt injection + filter tests
+        run: npm run test:security
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: security-test-results
+          path: |
+            coverage/
+            test-results/
+          retention-days: 90
+
+  # ── 5. Secret scan ─────────────────────────────────────────────────────────
+  secret-scan:
+    name: Secret Scan (Gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── 6. SSRF regression ────────────────────────────────────────────────────
+  ssrf-regression:
+    name: SSRF Regression (http-guard enforcement)
+    runs-on: ubuntu-latest
+    needs: typecheck
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - run: npm ci
+      - name: Verify no raw axios imports in src/
+        run: |
+          if grep -r "from 'axios'" src/ --include="*.ts" | grep -v "http-guard"; then
+            echo "ERROR: Raw axios import found outside http-guard. Use http-guard clients instead."
+            exit 1
+          fi
+          echo "✓ No raw axios imports outside http-guard"
+      - name: Verify http-guard is used for outbound HTTP
+        run: |
+          if grep -r "require('axios')" src/ --include="*.ts" | grep -v "http-guard"; then
+            echo "ERROR: Raw axios require found outside http-guard."
+            exit 1
+          fi
+          echo "✓ SSRF regression check passed"
+
+  # ── 7. Audit chain verification ───────────────────────────────────────────
+  audit-chain:
+    name: Audit Chain Integrity
+    runs-on: ubuntu-latest
+    needs: security-tests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - run: npm ci
+      - name: Verify audit log chain integrity
+        run: |
+          if [ -f "$AUDIT_LOG_PATH" ]; then
+            npx ts-node -e "
+              const { AuditLogger } = require('./src/security/audit-log');
+              const result = AuditLogger.verifyChain();
+              if (!result.valid) {
+                console.error('Audit chain INVALID:', result.reason);
+                process.exit(1);
+              }
+              console.log('✓ Audit chain valid. Entries:', result.entries);
+            "
+          else
+            echo "No audit log found — skipping chain verification (first run)"
+          fi
+        env:
+          AUDIT_LOG_PATH: ${{ vars.AUDIT_LOG_PATH || './everythingos-audit.jsonl' }}
+
+  # ── 8. SBOM generation ────────────────────────────────────────────────────
+  sbom:
+    name: Generate SBOM
+    runs-on: ubuntu-latest
+    needs: dependency-audit
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - run: npm ci
+      - name: Install CycloneDX
+        run: npm install -g @cyclonedx/cyclonedx-npm
+      - name: Generate SBOM
+        run: cyclonedx-npm --output-format json --output-file sbom.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ github.sha }}
+          path: sbom.json
+          retention-days: 365
+
+  # ── 9. Adversarial eval harness (weekly only) ─────────────────────────────
+  eval-harness:
+    name: Adversarial Eval Harness
+    runs-on: ubuntu-latest
+    needs: security-tests
+    if: github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - run: npm ci
+      - name: Run eval harness
+        run: npx ts-node tests/eval/eval-harness.ts
+        env:
+          EVAL_REPORT_DIR: ./eval-reports
+      - name: Commit eval report to repo
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add eval-reports/
+          git diff --staged --quiet || git commit -m "ci: add weekly eval report $(date +%Y-%m-%d)"
+          git push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-report-${{ github.run_id }}
+          path: eval-reports/
+          retention-days: 365

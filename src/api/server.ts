@@ -11,10 +11,53 @@ import { worldState } from '../core/state/WorldState';
 import { decisionExplainability } from '../services/explainability';
 import { pluginTrustManager, TrustLevel } from '../services/trust';
 
+// Security initialization
+import { AuditLogger } from '../security/audit-log';
+import { DecisionLedger } from '../security/decision-ledger';
+import { QuarantineManager } from '../security/quarantine';
+
 // Simple HTTP server without Express dependency for now
 import { createServer, IncomingMessage, ServerResponse } from 'http';
 
 const PORT = process.env.PORT || 3000;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Security Bootstrap
+// Must run before any agents start or requests are handled.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function initializeSecurity(): void {
+  // 1. Audit log — tamper-evident, hash-chained event trail
+  AuditLogger.initialize();
+
+  // 2. Decision ledger — provenance record for every LLM call
+  DecisionLedger.initialize();
+
+  // 3. Quarantine manager — surgical per-agent isolation
+  //    Wired to registry so quarantine() can stop agents without circular deps
+  QuarantineManager.initialize({
+    stopAgent: async (id: string) => {
+      await agentRegistry.stopAgent(id);
+    },
+    getAgentState: (id: string) => {
+      const agent = agentRegistry.get(id);
+      return agent ? { id: agent.id, status: agent.status, type: agent.config?.type } : {};
+    },
+    getAgentSubscriptions: (_id: string) => {
+      // EventBus subscription list — return empty array if not exposed
+      // Replace with eventBus.getSubscriptions(id) if your EventBus supports it
+      return [];
+    },
+  });
+
+  AuditLogger.log({
+    agentId: 'system',
+    event: 'agent.started',
+    metadata: { component: 'security-bootstrap', version: process.env.EOS_POLICY_VERSION || '1.0.0' },
+  });
+
+  console.log('🔒 Security subsystems initialized (audit-log, decision-ledger, quarantine)');
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Request Handling
@@ -162,7 +205,6 @@ async function route(
 
   // Approvals
   if (path === '/api/approvals' && method === 'GET') {
-    // Get pending approvals - emit request and collect from approval gate
     const pending = agentRegistry.get('approval-gate');
     if (pending && 'getPending' in pending) {
       return { status: 200, data: (pending as { getPending: () => unknown[] }).getPending() };
@@ -296,6 +338,9 @@ async function route(
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function startServer(port = PORT): void {
+  // Security must initialize before the server accepts any connections
+  initializeSecurity();
+
   const server = createServer(handleRequest);
   
   server.listen(port, () => {
