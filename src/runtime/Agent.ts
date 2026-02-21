@@ -18,6 +18,7 @@ import { sanitizeInput, scrubPII, checkRateLimit, SanitizedInput } from '../secu
 import { filterOutput, FilterResult } from '../security/content-filter';
 import { AuditLogger, hashContent } from '../security/audit-log';
 import { AgentAuthManager, AgentToken } from '../security/agent-auth';
+import { DecisionLedger } from '../security/decision-ledger';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // AgentConfig — riskConfig is REQUIRED, not optional
@@ -231,7 +232,16 @@ export abstract class Agent {
       AuditLogger.log({ agentId: this.id, event: 'llm.call', inputHash });
     }
 
-    // 3. LLM call
+    // 3. LLM call — wrapped with DecisionLedger for provenance
+    const ledgerContext = DecisionLedger.buildContext({
+      modelId: this.config.llm.model,
+      promptTemplate: prompt,
+      parameters: {
+        temperature: options?.temperature ?? this.config.llm.temperature ?? 0.7,
+        maxTokens: this.config.llm.maxTokens ?? 1000,
+      },
+    });
+
     const response = await llmRouter.complete({
       provider: this.config.llm.provider,
       model: this.config.llm.model,
@@ -241,6 +251,15 @@ export abstract class Agent {
       ],
       temperature: options?.temperature ?? this.config.llm.temperature,
       maxTokens: this.config.llm.maxTokens,
+    });
+
+    DecisionLedger.record({
+      agentId: this.id,
+      decisionType: 'llm.think',
+      context: ledgerContext,
+      inputHash,
+      outputHash: hashContent(response.content),
+      outcome: { provider: this.config.llm.provider, finishReason: response.finishReason },
     });
 
     // 4. Content filter — MANDATORY on all LLM outputs
