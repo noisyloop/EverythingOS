@@ -185,7 +185,7 @@ export const AgentRegistry = {
     if (!agent) return;
 
     if (agent.isRunning()) {
-      throw new Error(`[AgentRegistry] Cannot unregister running agent "${agentId}". Stop it first.`);
+      try { this.stop(agentId); } catch {}
     }
 
     registry.delete(agentId);

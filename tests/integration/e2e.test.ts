@@ -211,6 +211,8 @@ function cleanupAll(): void {
 
 describe('EverythingOS — End-to-End Integration', () => {
   beforeAll(() => {
+    const fs = require('fs');
+    try { fs.unlinkSync('./everythingos-audit.jsonl'); } catch {}
     AuditLogger.initialize();
     DecisionLedger.initialize();
     QuarantineManager.initialize({
