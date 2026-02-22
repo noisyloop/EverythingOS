@@ -115,10 +115,40 @@ export interface MessageGuardConfig {
 // Message Guard
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Fully-resolved (all nested fields required) internal config type.
+// Required<MessageGuardConfig> is shallow; this ensures every nested field is non-optional.
+interface ResolvedGuardConfig {
+  rateLimiting: {
+    enabled: boolean;
+    userLimit: number;
+    channelLimit: number;
+    globalLimit: number;
+  };
+  promptProtection: {
+    enabled: boolean;
+    blockThreshold: number;
+    maxMessageLength: number;
+  };
+  accessControl: {
+    enabled: boolean;
+    defaultAllow: boolean;
+    whitelistedChannels: string[];
+    blacklistedChannels: string[];
+    whitelistedUsers: string[];
+    blacklistedUsers: string[];
+    adminUsers: string[];
+  };
+  auditLogging: {
+    enabled: boolean;
+    logAllowed: boolean;
+    retentionDays: number;
+  };
+}
+
 export class MessageGuard {
   private rateLimiter: ChannelRateLimiter;
   private promptArmor: PromptArmor;
-  private config: Required<MessageGuardConfig>;
+  private config: ResolvedGuardConfig;
   private auditLog: AuditLogEntry[] = [];
   private maxAuditEntries = 10000;
 
@@ -154,7 +184,7 @@ export class MessageGuard {
     });
   }
 
-  private mergeConfig(config?: MessageGuardConfig): Required<MessageGuardConfig> {
+  private mergeConfig(config?: MessageGuardConfig): ResolvedGuardConfig {
     return {
       rateLimiting: {
         enabled: config?.rateLimiting?.enabled ?? true,
@@ -489,7 +519,7 @@ export class MessageGuard {
       entries = entries.filter(e => e.channelId === options.channelId);
     }
     if (options?.since) {
-      entries = entries.filter(e => e.timestamp >= options.since);
+      entries = entries.filter(e => e.timestamp >= options.since!);
     }
 
     // Sort by timestamp descending
