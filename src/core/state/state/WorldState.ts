@@ -3,7 +3,7 @@
 // Global state management for the system
 // ═══════════════════════════════════════════════════════════════════════════════
 
-import { eventBus } from '../event-bus/EventBus';
+import { eventBus } from '../../event-bus/EventBus';
 
 export class WorldState {
   private global: Map<string, unknown> = new Map();

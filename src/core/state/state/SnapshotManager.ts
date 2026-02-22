@@ -4,7 +4,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 
 import { worldState, StateSnapshot } from './WorldState';
-import { eventBus } from '../event-bus/EventBus';
+import { eventBus } from '../../event-bus/EventBus';
 
 export interface SnapshotMetadata {
   id: string;

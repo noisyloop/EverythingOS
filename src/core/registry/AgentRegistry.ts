@@ -18,14 +18,14 @@ export class AgentRegistry {
       throw new Error(`Agent already registered: ${agent.id}`);
     }
     this.agents.set(agent.id, agent);
-    eventBus.emit('agent:registered', { agentId: agent.id, config: agent.config });
+    eventBus.emit('agent:registered', { agentId: agent.id, config: agent.getConfig() });
   }
 
   unregister(agentId: string): boolean {
     const agent = this.agents.get(agentId);
     if (!agent) return false;
 
-    if (agent.status === 'running') {
+    if (agent.getStatus() === 'running') {
       agent.stop();
     }
     this.agents.delete(agentId);
@@ -53,14 +53,14 @@ export class AgentRegistry {
     let results = this.getAll();
     
     if (filter.type) {
-      results = results.filter(a => a.config.type === filter.type);
+      results = results.filter(a => a.getConfig().type === filter.type);
     }
     if (filter.status) {
-      results = results.filter(a => a.status === filter.status);
+      results = results.filter(a => a.getStatus() === filter.status);
     }
     if (filter.tags) {
       results = results.filter(a =>
-        filter.tags!.some(t => a.config.tags?.includes(t))
+        filter.tags!.some(t => a.getConfig().tags?.includes(t))
       );
     }
     
@@ -78,7 +78,7 @@ export class AgentRegistry {
   async startAgent(agentId: string): Promise<void> {
     const agent = this.agents.get(agentId);
     if (!agent) throw new Error(`Agent not found: ${agentId}`);
-    await agent.start();
+    await agent._internalStart();
   }
 
   async stopAgent(agentId: string): Promise<void> {
@@ -89,11 +89,11 @@ export class AgentRegistry {
 
   async startAll(): Promise<void> {
     const agents = this.getAll();
-    await Promise.all(agents.map(a => a.start()));
+    await Promise.all(agents.map(a => a._internalStart()));
   }
 
   async stopAll(): Promise<void> {
-    const agents = this.getAll().filter(a => a.status === 'running');
+    const agents = this.getAll().filter(a => a.getStatus() === 'running');
     await Promise.all(agents.map(a => a.stop()));
   }
 
@@ -111,8 +111,8 @@ export class AgentRegistry {
     const byType: Record<string, number> = {};
 
     for (const agent of agents) {
-      byStatus[agent.status] = (byStatus[agent.status] || 0) + 1;
-      byType[agent.config.type] = (byType[agent.config.type] || 0) + 1;
+      byStatus[agent.getStatus()] = (byStatus[agent.getStatus()] || 0) + 1;
+      byType[agent.getConfig().type] = (byType[agent.getConfig().type] || 0) + 1;
     }
 
     return {
