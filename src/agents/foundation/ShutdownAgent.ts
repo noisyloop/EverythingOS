@@ -1,23 +1,18 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // EVERYTHINGOS - Shutdown Agent
 // Graceful shutdown coordination for the entire system
-// Ensures all agents stop cleanly and resources are released
 // ═══════════════════════════════════════════════════════════════════════════════
 
 import { Agent, AgentConfig } from '../../runtime/Agent';
-import { eventBus } from '../../core/event-bus/EventBus';
+import { AgentRiskTier } from '../../types/agent-risk';
 import { agentRegistry } from '../../core/registry/AgentRegistry';
 import { snapshotManager } from '../../core/state/SnapshotManager';
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Types
-// ─────────────────────────────────────────────────────────────────────────────
-
 export interface ShutdownConfig {
-  timeout: number;              // Max time to wait for graceful shutdown (ms)
-  createSnapshot: boolean;      // Create state snapshot before shutdown
-  stopOrder?: string[];         // Agent IDs to stop in specific order
-  skipAgents?: string[];        // Agent IDs to skip (they handle their own shutdown)
+  timeout: number;
+  createSnapshot: boolean;
+  stopOrder?: string[];
+  skipAgents?: string[];
 }
 
 export interface ShutdownProgress {
@@ -30,7 +25,7 @@ export interface ShutdownProgress {
   elapsed: number;
 }
 
-export type ShutdownPhase = 
+export type ShutdownPhase =
   | 'idle'
   | 'initiated'
   | 'snapshot'
@@ -39,12 +34,8 @@ export type ShutdownPhase =
   | 'complete'
   | 'forced';
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Shutdown Agent
-// ─────────────────────────────────────────────────────────────────────────────
-
 export class ShutdownAgent extends Agent {
-  private config: ShutdownConfig;
+  private shutdownConfig: ShutdownConfig;
   private phase: ShutdownPhase = 'idle';
   private shutdownPromise?: Promise<void>;
   private shutdownResolve?: () => void;
@@ -57,51 +48,47 @@ export class ShutdownAgent extends Agent {
       name: 'Shutdown Agent',
       type: 'foundation',
       description: 'Coordinates graceful system shutdown',
-      tickRate: 0, // No tick needed
+      tickRate: 0,
+      riskConfig: {
+        tier: AgentRiskTier.LOW,
+        riskJustification: 'Foundation shutdown coordinator — orchestrates clean exit',
+        allowedPublishChannels: [
+          'shutdown:initiated', 'shutdown:snapshot', 'shutdown:agent:stopped',
+          'shutdown:agent:error', 'shutdown:cleanup', 'shutdown:complete',
+          'shutdown:forced', 'shutdown:progress',
+        ],
+        allowedSubscribeChannels: ['system:shutdown'],
+      },
       ...agentConfig,
     });
 
-    this.config = {
+    this.shutdownConfig = {
       timeout: 30000,
       createSnapshot: true,
       stopOrder: [],
-      skipAgents: ['shutdown'], // Don't try to stop ourselves
+      skipAgents: ['shutdown'],
       ...shutdownConfig,
     };
 
     this.progress = this.createInitialProgress();
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // Lifecycle
-  // ─────────────────────────────────────────────────────────────────────────
-
   protected async onStart(): Promise<void> {
-    // Listen for shutdown requests
     this.subscribe('system:shutdown', async (event) => {
       const { force, reason } = event.payload as { force?: boolean; reason?: string };
       await this.initiateShutdown(force, reason);
     });
 
-    // Install process signal handlers
     this.installSignalHandlers();
-
     this.log('info', 'Shutdown agent started');
   }
 
   protected async onStop(): Promise<void> {
-    // Remove signal handlers
     this.removeSignalHandlers();
     this.log('info', 'Shutdown agent stopped');
   }
 
-  protected async onTick(): Promise<void> {
-    // No periodic work needed
-  }
-
-  // ─────────────────────────────────────────────────────────────────────────
-  // Signal Handlers
-  // ─────────────────────────────────────────────────────────────────────────
+  protected async onTick(): Promise<void> {}
 
   private installSignalHandlers(): void {
     if (this.signalHandlersInstalled) return;
@@ -114,7 +101,6 @@ export class ShutdownAgent extends Agent {
     process.on('SIGINT', () => handleSignal('SIGINT'));
     process.on('SIGTERM', () => handleSignal('SIGTERM'));
 
-    // Handle uncaught exceptions gracefully
     process.on('uncaughtException', (error) => {
       this.log('error', `Uncaught exception: ${error.message}`);
       this.initiateShutdown(true, `Uncaught exception: ${error.message}`);
@@ -122,20 +108,14 @@ export class ShutdownAgent extends Agent {
 
     process.on('unhandledRejection', (reason) => {
       this.log('error', `Unhandled rejection: ${reason}`);
-      // Don't shutdown on unhandled rejection, just log
     });
 
     this.signalHandlersInstalled = true;
   }
 
   private removeSignalHandlers(): void {
-    // Note: In real implementation, we'd track and remove specific handlers
     this.signalHandlersInstalled = false;
   }
-
-  // ─────────────────────────────────────────────────────────────────────────
-  // Shutdown Coordination
-  // ─────────────────────────────────────────────────────────────────────────
 
   async initiateShutdown(force = false, reason?: string): Promise<void> {
     if (this.phase !== 'idle') {
@@ -154,13 +134,12 @@ export class ShutdownAgent extends Agent {
       this.shutdownResolve = resolve;
     });
 
-    // Set timeout for forced shutdown
     const timeoutId = setTimeout(() => {
       if (this.phase !== 'complete') {
         this.log('warn', 'Shutdown timeout reached, forcing shutdown');
         this.forceShutdown();
       }
-    }, this.config.timeout);
+    }, this.shutdownConfig.timeout);
 
     try {
       if (force) {
@@ -178,11 +157,10 @@ export class ShutdownAgent extends Agent {
   private async gracefulShutdown(): Promise<void> {
     const startTime = Date.now();
 
-    // Phase 1: Create snapshot
-    if (this.config.createSnapshot) {
+    if (this.shutdownConfig.createSnapshot) {
       this.updatePhase('snapshot');
       try {
-        const snapshot = snapshotManager.createSnapshot('pre-shutdown');
+        const snapshot = snapshotManager.takeSnapshot('pre-shutdown');
         this.log('info', `Snapshot created: ${snapshot.id}`);
         this.emit('shutdown:snapshot', { snapshotId: snapshot.id });
       } catch (error) {
@@ -191,34 +169,26 @@ export class ShutdownAgent extends Agent {
       }
     }
 
-    // Phase 2: Stop agents
     this.updatePhase('stopping_agents');
     await this.stopAllAgents();
 
-    // Phase 3: Cleanup
     this.updatePhase('cleanup');
     await this.cleanup();
 
-    // Complete
     this.updatePhase('complete');
     this.progress.elapsed = Date.now() - startTime;
 
     this.log('info', `Graceful shutdown complete (${this.progress.elapsed}ms)`);
-    this.emit('shutdown:complete', { 
-      elapsed: this.progress.elapsed,
-      errors: this.progress.errors,
-    });
+    this.emit('shutdown:complete', { elapsed: this.progress.elapsed, errors: this.progress.errors });
 
     this.shutdownResolve?.();
   }
 
   private async forceShutdown(): Promise<void> {
     this.updatePhase('forced');
-    
     this.log('warn', 'Forcing immediate shutdown');
     this.emit('shutdown:forced', {});
 
-    // Try to stop agents quickly
     const agents = agentRegistry.getAll();
     await Promise.allSettled(
       agents.map(agent => agent.stop().catch(() => {}))
@@ -226,28 +196,23 @@ export class ShutdownAgent extends Agent {
 
     this.updatePhase('complete');
     this.shutdownResolve?.();
-
-    // In production, might call process.exit(1) here
   }
 
   private async stopAllAgents(): Promise<void> {
     const allAgents = agentRegistry.getAll();
-    const skipSet = new Set(this.config.skipAgents);
+    const skipSet = new Set(this.shutdownConfig.skipAgents);
 
-    // Build stop order
-    const orderedIds = [...this.config.stopOrder!];
+    const orderedIds = [...(this.shutdownConfig.stopOrder ?? [])];
     const remainingAgents = allAgents.filter(
       a => !skipSet.has(a.getId()) && !orderedIds.includes(a.getId())
     );
-    
-    // Add remaining agents (in reverse registration order for proper dependencies)
+
     for (const agent of remainingAgents.reverse()) {
       orderedIds.push(agent.getId());
     }
 
     this.progress.agentsTotal = orderedIds.length;
 
-    // Stop agents in order
     for (const agentId of orderedIds) {
       if (skipSet.has(agentId)) continue;
 
@@ -274,16 +239,9 @@ export class ShutdownAgent extends Agent {
   }
 
   private async cleanup(): Promise<void> {
-    // Emit cleanup event for any listeners
     this.emit('shutdown:cleanup', {});
-
-    // Give listeners a moment to cleanup
     await new Promise(resolve => setTimeout(resolve, 100));
   }
-
-  // ─────────────────────────────────────────────────────────────────────────
-  // Progress
-  // ─────────────────────────────────────────────────────────────────────────
 
   private createInitialProgress(): ShutdownProgress {
     return {
@@ -307,29 +265,11 @@ export class ShutdownAgent extends Agent {
     this.emit('shutdown:progress', { ...this.progress });
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // Public API
-  // ─────────────────────────────────────────────────────────────────────────
+  getPhase(): ShutdownPhase { return this.phase; }
+  getProgress(): ShutdownProgress { return { ...this.progress }; }
+  isShuttingDown(): boolean { return this.phase !== 'idle' && this.phase !== 'complete'; }
+  setShutdownConfig(config: Partial<ShutdownConfig>): void { Object.assign(this.shutdownConfig, config); }
 
-  getPhase(): ShutdownPhase {
-    return this.phase;
-  }
-
-  getProgress(): ShutdownProgress {
-    return { ...this.progress };
-  }
-
-  isShuttingDown(): boolean {
-    return this.phase !== 'idle' && this.phase !== 'complete';
-  }
-
-  setConfig(config: Partial<ShutdownConfig>): void {
-    Object.assign(this.config, config);
-  }
-
-  /**
-   * Request shutdown programmatically
-   */
   async shutdown(options?: { force?: boolean; reason?: string }): Promise<void> {
     return this.initiateShutdown(options?.force, options?.reason);
   }

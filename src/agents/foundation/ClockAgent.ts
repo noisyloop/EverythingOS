@@ -1,15 +1,10 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // EVERYTHINGOS - Clock Agent
 // System time, scheduling, and cron-like task execution
-// Foundation agent that all other agents can depend on for timing
 // ═══════════════════════════════════════════════════════════════════════════════
 
 import { Agent, AgentConfig } from '../../runtime/Agent';
-import { eventBus } from '../../core/event-bus/EventBus';
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Types
-// ─────────────────────────────────────────────────────────────────────────────
+import { AgentRiskTier } from '../../types/agent-risk';
 
 export interface ScheduledTask {
   id: string;
@@ -26,17 +21,13 @@ export interface ScheduledTask {
 
 export interface CronSchedule {
   type: 'cron';
-  expression: string;  // Simplified: "* * * * *" (min hour dom mon dow)
+  expression: string;
 }
 
 export interface IntervalSchedule {
   type: 'interval';
   ms: number;
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Clock Agent
-// ─────────────────────────────────────────────────────────────────────────────
 
 export class ClockAgent extends Agent {
   private tasks: Map<string, ScheduledTask> = new Map();
@@ -51,20 +42,27 @@ export class ClockAgent extends Agent {
       name: 'Clock Agent',
       type: 'foundation',
       description: 'System time, scheduling, and cron-like task execution',
-      tickRate: 1000, // 1 second tick for world time
+      tickRate: 1000,
+      riskConfig: {
+        tier: AgentRiskTier.LOW,
+        riskJustification: 'Foundation clock agent — emits timing events only',
+        allowedPublishChannels: [
+          'clock:started', 'clock:stopped', 'clock:minute', 'clock:hour',
+          'clock:task:scheduled', 'clock:task:unscheduled', 'clock:task:enabled',
+          'clock:task:disabled', 'clock:task:executed', 'world:tick',
+        ],
+        allowedSubscribeChannels: [
+          'clock:schedule', 'clock:unschedule', 'clock:enable', 'clock:disable',
+        ],
+      },
       ...config,
     });
   }
-
-  // ─────────────────────────────────────────────────────────────────────────
-  // Lifecycle
-  // ─────────────────────────────────────────────────────────────────────────
 
   protected async onStart(): Promise<void> {
     this.startTime = Date.now();
     this.worldTick = 0;
 
-    // Listen for task management events
     this.subscribe('clock:schedule', (event) => {
       const task = event.payload as Omit<ScheduledTask, 'id' | 'runCount'>;
       this.scheduleTask(task);
@@ -90,12 +88,10 @@ export class ClockAgent extends Agent {
   }
 
   protected async onStop(): Promise<void> {
-    // Clear all task timers
     for (const timer of this.taskTimers.values()) {
       clearTimeout(timer);
     }
     this.taskTimers.clear();
-
     this.log('info', 'Clock agent stopped');
     this.emit('clock:stopped', { uptime: this.getUptime() });
   }
@@ -103,17 +99,14 @@ export class ClockAgent extends Agent {
   protected async onTick(): Promise<void> {
     this.worldTick++;
 
-    // Emit world tick event
     this.emit('world:tick', {
       tick: this.worldTick,
       timestamp: Date.now(),
       uptime: this.getUptime(),
     });
 
-    // Check cron tasks (simplified check every tick)
     this.checkCronTasks();
 
-    // Emit time markers
     if (this.worldTick % 60 === 0) {
       this.emit('clock:minute', { minute: Math.floor(this.worldTick / 60) });
     }
@@ -122,13 +115,9 @@ export class ClockAgent extends Agent {
     }
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // Task Scheduling
-  // ─────────────────────────────────────────────────────────────────────────
-
   scheduleTask(task: Omit<ScheduledTask, 'id' | 'runCount'>): string {
     const id = `task_${++this.taskCounter}_${Date.now()}`;
-    
+
     const fullTask: ScheduledTask = {
       ...task,
       id,
@@ -152,7 +141,6 @@ export class ClockAgent extends Agent {
     const task = this.tasks.get(taskId);
     if (!task) return false;
 
-    // Clear timer
     const timer = this.taskTimers.get(taskId);
     if (timer) {
       clearTimeout(timer);
@@ -199,6 +187,7 @@ export class ClockAgent extends Agent {
 
   private startIntervalTask(task: ScheduledTask): void {
     if (task.schedule.type !== 'interval') return;
+    const intervalSchedule = task.schedule as IntervalSchedule;
 
     const runTask = () => {
       if (!task.enabled) return;
@@ -209,12 +198,11 @@ export class ClockAgent extends Agent {
 
       this.executeTask(task);
 
-      // Schedule next run
-      const timer = setTimeout(runTask, task.schedule.ms);
+      const timer = setTimeout(runTask, intervalSchedule.ms);
       this.taskTimers.set(task.id, timer);
     };
 
-    const timer = setTimeout(runTask, task.schedule.ms);
+    const timer = setTimeout(runTask, intervalSchedule.ms);
     this.taskTimers.set(task.id, timer);
   }
 
@@ -237,7 +225,7 @@ export class ClockAgent extends Agent {
     task.runCount++;
 
     this.emit(task.event, {
-      ...task.payload,
+      ...task.payload as object,
       _taskId: task.id,
       _taskName: task.name,
       _runCount: task.runCount,
@@ -252,11 +240,9 @@ export class ClockAgent extends Agent {
 
   private calculateNextRun(schedule: CronSchedule | IntervalSchedule): number {
     if (schedule.type === 'interval') {
-      return Date.now() + schedule.ms;
+      return Date.now() + (schedule as IntervalSchedule).ms;
     }
 
-    // Simplified cron: just return next minute for now
-    // Full implementation would parse cron expression
     const now = new Date();
     now.setSeconds(0);
     now.setMilliseconds(0);
@@ -264,78 +250,31 @@ export class ClockAgent extends Agent {
     return now.getTime();
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // Time Utilities
-  // ─────────────────────────────────────────────────────────────────────────
+  getTime(): number { return Date.now(); }
+  getUptime(): number { return Date.now() - this.startTime; }
+  getWorldTick(): number { return this.worldTick; }
+  getTasks(): ScheduledTask[] { return Array.from(this.tasks.values()); }
+  getTask(taskId: string): ScheduledTask | undefined { return this.tasks.get(taskId); }
 
-  getTime(): number {
-    return Date.now();
-  }
-
-  getUptime(): number {
-    return Date.now() - this.startTime;
-  }
-
-  getWorldTick(): number {
-    return this.worldTick;
-  }
-
-  getTasks(): ScheduledTask[] {
-    return Array.from(this.tasks.values());
-  }
-
-  getTask(taskId: string): ScheduledTask | undefined {
-    return this.tasks.get(taskId);
-  }
-
-  // ─────────────────────────────────────────────────────────────────────────
-  // Convenience Methods
-  // ─────────────────────────────────────────────────────────────────────────
-
-  /**
-   * Schedule an event to fire once after a delay
-   */
   setTimeout(event: string, delayMs: number, payload?: unknown): string {
     return this.scheduleTask({
       name: `timeout_${event}`,
       schedule: { type: 'interval', ms: delayMs },
-      event,
-      payload,
-      enabled: true,
-      maxRuns: 1,
+      event, payload, enabled: true, maxRuns: 1,
     });
   }
 
-  /**
-   * Schedule an event to fire repeatedly at an interval
-   */
   setInterval(event: string, intervalMs: number, payload?: unknown): string {
     return this.scheduleTask({
       name: `interval_${event}`,
       schedule: { type: 'interval', ms: intervalMs },
-      event,
-      payload,
-      enabled: true,
+      event, payload, enabled: true,
     });
   }
 
-  /**
-   * Clear a timeout or interval
-   */
-  clearTimeout(taskId: string): boolean {
-    return this.unscheduleTask(taskId);
-  }
+  clearTimeout(taskId: string): boolean { return this.unscheduleTask(taskId); }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // Status
-  // ─────────────────────────────────────────────────────────────────────────
-
-  getStatus(): {
-    uptime: number;
-    worldTick: number;
-    taskCount: number;
-    activeTasks: number;
-  } {
+  getClockStatus(): { uptime: number; worldTick: number; taskCount: number; activeTasks: number } {
     return {
       uptime: this.getUptime(),
       worldTick: this.worldTick,

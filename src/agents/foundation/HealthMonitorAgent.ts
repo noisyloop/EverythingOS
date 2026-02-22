@@ -1,17 +1,13 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // EVERYTHINGOS - Health Monitor Agent
 // System health monitoring: CPU, memory, disk, agent health, event throughput
-// Foundation agent for observability and alerting
 // ═══════════════════════════════════════════════════════════════════════════════
 
-import { Agent, AgentConfig } from '../../runtime/Agent';
+import { Agent, AgentConfig, AgentStatus } from '../../runtime/Agent';
+import { AgentRiskTier } from '../../types/agent-risk';
 import { eventBus } from '../../core/event-bus/EventBus';
 import { agentRegistry } from '../../core/registry/AgentRegistry';
 import { metrics } from '../../observability/MetricsCollector';
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Types
-// ─────────────────────────────────────────────────────────────────────────────
 
 export interface SystemHealth {
   timestamp: number;
@@ -24,21 +20,21 @@ export interface SystemHealth {
 }
 
 export interface CPUHealth {
-  usage: number;           // 0-100%
-  loadAvg: number[];       // 1, 5, 15 min
+  usage: number;
+  loadAvg: number[];
 }
 
 export interface MemoryHealth {
-  total: number;           // bytes
+  total: number;
   used: number;
   free: number;
-  usagePercent: number;    // 0-100%
-  heapUsed: number;        // Node.js heap
+  usagePercent: number;
+  heapUsed: number;
   heapTotal: number;
 }
 
 export interface DiskHealth {
-  total: number;           // bytes
+  total: number;
   used: number;
   free: number;
   usagePercent: number;
@@ -46,8 +42,8 @@ export interface DiskHealth {
 
 export interface ProcessHealth {
   pid: number;
-  uptime: number;          // seconds
-  memoryUsage: number;     // bytes (RSS)
+  uptime: number;
+  memoryUsage: number;
 }
 
 export interface AgentHealth {
@@ -55,17 +51,17 @@ export interface AgentHealth {
   running: number;
   stopped: number;
   error: number;
-  unhealthy: string[];     // IDs of unhealthy agents
+  unhealthy: string[];
 }
 
 export interface EventHealth {
-  throughput: number;      // events/sec
+  throughput: number;
   queueSize: number;
   deadLetterCount: number;
 }
 
 export interface HealthThresholds {
-  cpuWarning: number;      // %
+  cpuWarning: number;
   cpuCritical: number;
   memoryWarning: number;
   memoryCritical: number;
@@ -75,17 +71,13 @@ export interface HealthThresholds {
 
 export type HealthStatus = 'healthy' | 'degraded' | 'unhealthy' | 'critical';
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Health Monitor Agent
-// ─────────────────────────────────────────────────────────────────────────────
-
 export class HealthMonitorAgent extends Agent {
   private thresholds: HealthThresholds;
   private lastHealth?: SystemHealth;
   private eventCount = 0;
   private lastEventCountTime = Date.now();
   private healthHistory: SystemHealth[] = [];
-  private maxHistorySize = 60; // Keep 60 samples (1 hour at 1/min)
+  private maxHistorySize = 60;
 
   constructor(config?: Partial<AgentConfig> & { thresholds?: Partial<HealthThresholds> }) {
     super({
@@ -93,7 +85,13 @@ export class HealthMonitorAgent extends Agent {
       name: 'Health Monitor Agent',
       type: 'foundation',
       description: 'Monitors system health and emits alerts',
-      tickRate: 10000, // Check every 10 seconds
+      tickRate: 10000,
+      riskConfig: {
+        tier: AgentRiskTier.LOW,
+        riskJustification: 'Foundation health monitor — read-only system observation',
+        allowedPublishChannels: ['health:started', 'health:report', 'health:alert', 'health:thresholds:updated'],
+        allowedSubscribeChannels: [],
+      },
       ...config,
     });
 
@@ -108,16 +106,8 @@ export class HealthMonitorAgent extends Agent {
     };
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // Lifecycle
-  // ─────────────────────────────────────────────────────────────────────────
-
   protected async onStart(): Promise<void> {
-    // Count events for throughput
-    eventBus.on('*', () => {
-      this.eventCount++;
-    });
-
+    eventBus.on('*', () => { this.eventCount++; });
     this.log('info', 'Health monitor started');
     this.emit('health:started', { thresholds: this.thresholds });
   }
@@ -130,28 +120,17 @@ export class HealthMonitorAgent extends Agent {
     const health = await this.collectHealth();
     this.lastHealth = health;
 
-    // Store in history
     this.healthHistory.push(health);
     if (this.healthHistory.length > this.maxHistorySize) {
       this.healthHistory.shift();
     }
 
-    // Update metrics
     this.updateMetrics(health);
 
-    // Determine overall status
     const status = this.determineStatus(health);
-
-    // Emit health event
     this.emit('health:report', { health, status });
-
-    // Emit alerts if needed
     this.checkAndEmitAlerts(health, status);
   }
-
-  // ─────────────────────────────────────────────────────────────────────────
-  // Health Collection
-  // ─────────────────────────────────────────────────────────────────────────
 
   async collectHealth(): Promise<SystemHealth> {
     const now = Date.now();
@@ -167,23 +146,16 @@ export class HealthMonitorAgent extends Agent {
       disk: await this.collectDisk(),
       process: this.collectProcess(),
       agents: this.collectAgentHealth(),
-      events: {
-        throughput,
-        queueSize: 0, // Would get from eventBus.getStats()
-        deadLetterCount: 0,
-      },
+      events: { throughput, queueSize: 0, deadLetterCount: 0 },
     };
   }
 
   private async collectCPU(): Promise<CPUHealth> {
-    // In Node.js, we can use os module
-    // For now, simplified implementation
     try {
       const os = await import('os');
       const cpus = os.cpus();
       const loadAvg = os.loadavg();
 
-      // Calculate CPU usage from cpus
       let totalIdle = 0;
       let totalTick = 0;
       for (const cpu of cpus) {
@@ -193,11 +165,7 @@ export class HealthMonitorAgent extends Agent {
         totalIdle += cpu.times.idle;
       }
       const usage = 100 - (totalIdle / totalTick * 100);
-
-      return {
-        usage: Math.round(usage * 10) / 10,
-        loadAvg,
-      };
+      return { usage: Math.round(usage * 10) / 10, loadAvg };
     } catch {
       return { usage: 0, loadAvg: [0, 0, 0] };
     }
@@ -209,65 +177,36 @@ export class HealthMonitorAgent extends Agent {
       const total = os.totalmem();
       const free = os.freemem();
       const used = total - free;
-      const heapUsed = process.memoryUsage().heapUsed;
-      const heapTotal = process.memoryUsage().heapTotal;
-
+      const { heapUsed, heapTotal } = process.memoryUsage();
       return {
-        total,
-        used,
-        free,
+        total, used, free,
         usagePercent: Math.round((used / total) * 1000) / 10,
-        heapUsed,
-        heapTotal,
+        heapUsed, heapTotal,
       };
     } catch {
-      return {
-        total: 0,
-        used: 0,
-        free: 0,
-        usagePercent: 0,
-        heapUsed: 0,
-        heapTotal: 0,
-      };
+      return { total: 0, used: 0, free: 0, usagePercent: 0, heapUsed: 0, heapTotal: 0 };
     }
   }
 
   private async collectDisk(): Promise<DiskHealth> {
-    // Simplified - would use statvfs or df in real implementation
-    return {
-      total: 0,
-      used: 0,
-      free: 0,
-      usagePercent: 0,
-    };
+    return { total: 0, used: 0, free: 0, usagePercent: 0 };
   }
 
   private collectProcess(): ProcessHealth {
-    return {
-      pid: process.pid,
-      uptime: process.uptime(),
-      memoryUsage: process.memoryUsage().rss,
-    };
+    return { pid: process.pid, uptime: process.uptime(), memoryUsage: process.memoryUsage().rss };
   }
 
   private collectAgentHealth(): AgentHealth {
     const agents = agentRegistry.getAll();
     const unhealthy: string[] = [];
-
-    let running = 0;
-    let stopped = 0;
-    let error = 0;
+    let running = 0, stopped = 0, error = 0;
 
     for (const agent of agents) {
-      const status = agent.getStatus();
+      const status: AgentStatus = agent.getStatus();
       switch (status) {
-        case 'running':
-          running++;
-          break;
+        case 'running': running++; break;
         case 'stopped':
-        case 'idle':
-          stopped++;
-          break;
+        case 'idle': stopped++; break;
         case 'error':
           error++;
           unhealthy.push(agent.getId());
@@ -275,47 +214,29 @@ export class HealthMonitorAgent extends Agent {
       }
     }
 
-    return {
-      total: agents.length,
-      running,
-      stopped,
-      error,
-      unhealthy,
-    };
+    return { total: agents.length, running, stopped, error, unhealthy };
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // Status Determination
-  // ─────────────────────────────────────────────────────────────────────────
-
   private determineStatus(health: SystemHealth): HealthStatus {
-    // Critical conditions
     if (health.cpu.usage >= this.thresholds.cpuCritical) return 'critical';
     if (health.memory.usagePercent >= this.thresholds.memoryCritical) return 'critical';
     if (health.disk.usagePercent >= this.thresholds.diskCritical) return 'critical';
     if (health.agents.error > 0) return 'unhealthy';
-
-    // Warning conditions
     if (health.cpu.usage >= this.thresholds.cpuWarning) return 'degraded';
     if (health.memory.usagePercent >= this.thresholds.memoryWarning) return 'degraded';
     if (health.disk.usagePercent >= this.thresholds.diskWarning) return 'degraded';
-
     return 'healthy';
   }
 
   private checkAndEmitAlerts(health: SystemHealth, status: HealthStatus): void {
     if (status === 'critical') {
       this.emit('health:alert', {
-        level: 'critical',
-        status,
-        health,
+        level: 'critical', status, health,
         message: this.buildAlertMessage(health, 'critical'),
       }, { priority: 'critical' });
     } else if (status === 'unhealthy' || status === 'degraded') {
       this.emit('health:alert', {
-        level: 'warning',
-        status,
-        health,
+        level: 'warning', status, health,
         message: this.buildAlertMessage(health, 'warning'),
       }, { priority: 'high' });
     }
@@ -323,29 +244,13 @@ export class HealthMonitorAgent extends Agent {
 
   private buildAlertMessage(health: SystemHealth, level: string): string {
     const issues: string[] = [];
-
-    if (health.cpu.usage >= this.thresholds.cpuCritical) {
-      issues.push(`CPU critical: ${health.cpu.usage}%`);
-    } else if (health.cpu.usage >= this.thresholds.cpuWarning) {
-      issues.push(`CPU high: ${health.cpu.usage}%`);
-    }
-
-    if (health.memory.usagePercent >= this.thresholds.memoryCritical) {
-      issues.push(`Memory critical: ${health.memory.usagePercent}%`);
-    } else if (health.memory.usagePercent >= this.thresholds.memoryWarning) {
-      issues.push(`Memory high: ${health.memory.usagePercent}%`);
-    }
-
-    if (health.agents.error > 0) {
-      issues.push(`${health.agents.error} agent(s) in error state`);
-    }
-
+    if (health.cpu.usage >= this.thresholds.cpuCritical) issues.push(`CPU critical: ${health.cpu.usage}%`);
+    else if (health.cpu.usage >= this.thresholds.cpuWarning) issues.push(`CPU high: ${health.cpu.usage}%`);
+    if (health.memory.usagePercent >= this.thresholds.memoryCritical) issues.push(`Memory critical: ${health.memory.usagePercent}%`);
+    else if (health.memory.usagePercent >= this.thresholds.memoryWarning) issues.push(`Memory high: ${health.memory.usagePercent}%`);
+    if (health.agents.error > 0) issues.push(`${health.agents.error} agent(s) in error state`);
     return issues.join('; ');
   }
-
-  // ─────────────────────────────────────────────────────────────────────────
-  // Metrics
-  // ─────────────────────────────────────────────────────────────────────────
 
   private updateMetrics(health: SystemHealth): void {
     metrics.set('everythingos_cpu_usage_percent', health.cpu.usage);
@@ -357,19 +262,10 @@ export class HealthMonitorAgent extends Agent {
     metrics.set('everythingos_process_uptime_seconds', health.process.uptime);
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // Public API
-  // ─────────────────────────────────────────────────────────────────────────
+  getLastHealth(): SystemHealth | undefined { return this.lastHealth; }
+  getHealthHistory(): SystemHealth[] { return [...this.healthHistory]; }
 
-  getLastHealth(): SystemHealth | undefined {
-    return this.lastHealth;
-  }
-
-  getHealthHistory(): SystemHealth[] {
-    return [...this.healthHistory];
-  }
-
-  getStatus(): HealthStatus {
+  getHealthStatus(): HealthStatus {
     if (!this.lastHealth) return 'healthy';
     return this.determineStatus(this.lastHealth);
   }
@@ -379,7 +275,5 @@ export class HealthMonitorAgent extends Agent {
     this.emit('health:thresholds:updated', { thresholds: this.thresholds });
   }
 
-  getThresholds(): HealthThresholds {
-    return { ...this.thresholds };
-  }
+  getThresholds(): HealthThresholds { return { ...this.thresholds }; }
 }
