@@ -64,11 +64,8 @@ interface LLMResponse {
 }
 
 // Injected at runtime by the framework — not imported directly to avoid circular deps
+import { eventBus } from '../core/event-bus/EventBus';
 declare const llmRouter: { complete(req: LLMRequest): Promise<LLMResponse> };
-declare const eventBus: {
-  emit(type: string, payload: unknown, opts?: { source?: string; priority?: string }): void;
-  on(type: string, handler: (event: { type: string; payload: unknown }) => void): () => void;
-};
 declare const worldState: {
   getAgentState<T>(agentId: string, key: string): T | undefined;
   setAgentState<T>(agentId: string, key: string, value: T): void;
@@ -259,7 +256,7 @@ export abstract class Agent {
       context: ledgerContext,
       inputHash,
       outputHash: hashContent(response.content),
-      outcome: { provider: this.config.llm.provider, finishReason: response.finishReason },
+      outcome: { provider: this.config.llm.provider, finishReason: (response as any).finishReason },
     });
 
     // 4. Content filter — MANDATORY on all LLM outputs

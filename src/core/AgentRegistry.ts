@@ -81,7 +81,7 @@ export const AgentRegistry = {
    */
   register(agent: Agent): void {
     if (registry.has(agent.id)) {
-      throw new Error(`[AgentRegistry] Agent "${agent.id}" is already registered. Unregister it first.`);
+      this.unregister(agent.id);
     }
 
     // Track if ApprovalGateAgent is being registered

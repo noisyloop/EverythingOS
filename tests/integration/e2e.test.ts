@@ -201,7 +201,7 @@ function getStatus(agentId: string): 'running' | 'stopped' | 'unknown' {
 function cleanupAll(): void {
   const listed = AgentRegistry.list();
   for (const entry of listed) {
-    try { AgentRegistry.unregister(entry.id); } catch { /* ignore */ }
+    try { AgentRegistry.unregister(entry.id); } catch { }
   }
 }
 
@@ -222,7 +222,7 @@ describe('EverythingOS — End-to-End Integration', () => {
     });
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     cleanupAll();
   });
 

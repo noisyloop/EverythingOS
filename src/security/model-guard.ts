@@ -505,7 +505,7 @@ export const ModelGuard = {
     const stream = createReadStream(absolutePath);
 
     return new Promise((resolve, reject) => {
-      stream.on('data', (chunk: Buffer) => hash.update(chunk));
+      stream.on('data', (chunk: Buffer | string) => hash.update(chunk));
       stream.on('end', () => {
         const digest = hash.digest('hex');
         AuditLogger.log({
