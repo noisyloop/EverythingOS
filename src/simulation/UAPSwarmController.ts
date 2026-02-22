@@ -69,7 +69,7 @@ export class UAPSwarmController {
     
     // Elect new leader if needed
     if (this.leaderId === uapId) {
-      this.leaderId = this.uaps.size > 0 ? this.uaps.keys().next().value : null;
+      this.leaderId = this.uaps.size > 0 ? (this.uaps.keys().next().value ?? null) : null;
       if (this.leaderId) {
         eventBus.emit('swarm:leader:elected', { swarmId: this.id, leaderId: this.leaderId });
       }

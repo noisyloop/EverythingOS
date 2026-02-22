@@ -5,7 +5,7 @@
 // CRITICAL: All actuator commands go through safety checks and approval
 // ═══════════════════════════════════════════════════════════════════════════════
 
-import { eventBus } from '../../../core/event-bus/EventBus';
+import { eventBus, EventHandler } from '../../../core/event-bus/EventBus';
 import { PluginConfig, PluginAction } from '../../../core/registry/PluginRegistry';
 import {
   HardwareConfig,
@@ -30,7 +30,7 @@ export interface ActuatorConfig extends HardwareConfig {
   
   // Safety
   safetyLimits: SafetyLimits;  // Required for actuators
-  requiresApproval: boolean;   // Commands require human approval
+  requiresApproval?: boolean;   // Commands require human approval (default: true)
   emergencyStopPin?: number;   // Hardware E-stop pin
   
   // Motion parameters (for motion actuators)
@@ -75,8 +75,8 @@ export abstract class ActuatorPlugin<TValue = number> {
   protected stateTimer?: ReturnType<typeof setInterval>;
   
   // Command tracking
-  protected currentCommand?: ActuatorCommand;
-  protected commandQueue: ActuatorCommand[] = [];
+  protected currentCommand?: ActuatorCommand<TValue>;
+  protected commandQueue: ActuatorCommand<TValue>[] = [];
   protected commandHistory: CommandResult[] = [];
   protected commandIdCounter = 0;
   
@@ -523,7 +523,7 @@ export abstract class ActuatorPlugin<TValue = number> {
         resolve(false);
       }, 60000); // 1 minute timeout
 
-      const handleApproval = (event: { payload: { approvalId: string; approved: boolean } }) => {
+      const handleApproval: EventHandler<{ approvalId: string; approved: boolean }> = (event) => {
         if (event.payload.approvalId === approvalId) {
           cleanup();
           resolve(event.payload.approved);
@@ -532,10 +532,10 @@ export abstract class ActuatorPlugin<TValue = number> {
 
       const cleanup = () => {
         clearTimeout(timeout);
-        eventBus.off('hardware:approval:response', handleApproval);
+        eventBus.off('hardware:approval:response', handleApproval as EventHandler);
       };
 
-      eventBus.on('hardware:approval:response', handleApproval);
+      eventBus.on<{ approvalId: string; approved: boolean }>('hardware:approval:response', handleApproval);
     });
   }
 

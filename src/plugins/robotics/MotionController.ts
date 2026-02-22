@@ -250,7 +250,7 @@ export class MotionController {
         await this.moveTo(waypoint.positions, waypoint.duration);
         
         // Handle pause
-        while (this.state === 'paused') {
+        while ((this.state as MotionState) === 'paused') {
           await this.sleep(100);
         }
       }

@@ -171,7 +171,7 @@ export class PluginTrustManager {
       level,
       permissions,
       restrictions: [
-        ...policy.restrictions,
+        ...(policy.restrictions ?? []),
         ...(options?.additionalRestrictions ?? []),
       ],
       audit: level !== 'trusted', // Audit non-trusted plugins

@@ -12,7 +12,7 @@ export interface PluginAction {
   description?: string;
   schema?: Record<string, unknown>;  // JSON Schema for validation
   handler: (input: unknown, context: PluginContext) => Promise<unknown>;
-  requiredPermissions?: Array<'network' | 'filesystem' | 'state:write' | 'secrets'>;
+  requiredPermissions?: Array<'network' | 'filesystem' | 'state:write' | 'secrets' | 'hardware'>;
 }
 
 export interface PluginConfig {

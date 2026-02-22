@@ -5,7 +5,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 
 import { ProtocolBase, ProtocolConfig, ProtocolMessage } from './ProtocolBase';
-import { ConnectionConfig } from '../_base/HardwareTypes';
+import { ConnectionConfig } from '../hardware/_base/HardwareTypes';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // WebSocket Configuration
@@ -380,11 +380,11 @@ export class WebSocketProtocol extends ProtocolBase {
       };
 
       const originalOnError = this.socket.onerror;
-      this.socket.onerror = (event) => {
+      this.socket.onerror = (event: Event) => {
         clearTimeout(timeout);
         reject(new Error('Connection failed'));
         if (originalOnError) {
-          originalOnError.call(this.socket, event);
+          (originalOnError as (ev: Event) => void).call(this.socket, event);
         }
       };
     });

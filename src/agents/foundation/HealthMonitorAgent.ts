@@ -15,7 +15,7 @@ export interface SystemHealth {
   memory: MemoryHealth;
   disk: DiskHealth;
   process: ProcessHealth;
-  agents: AgentHealth;
+  agents: AgentHealthStats;
   events: EventHealth;
 }
 
@@ -46,7 +46,7 @@ export interface ProcessHealth {
   memoryUsage: number;
 }
 
-export interface AgentHealth {
+export interface AgentHealthStats {
   total: number;
   running: number;
   stopped: number;
@@ -145,7 +145,7 @@ export class HealthMonitorAgent extends Agent {
       memory: this.collectMemory(),
       disk: await this.collectDisk(),
       process: this.collectProcess(),
-      agents: this.collectAgentHealth(),
+      agents: this.collectAgentHealthStats(),
       events: { throughput, queueSize: 0, deadLetterCount: 0 },
     };
   }
@@ -196,7 +196,7 @@ export class HealthMonitorAgent extends Agent {
     return { pid: process.pid, uptime: process.uptime(), memoryUsage: process.memoryUsage().rss };
   }
 
-  private collectAgentHealth(): AgentHealth {
+  private collectAgentHealthStats(): AgentHealthStats {
     const agents = agentRegistry.getAll();
     const unhealthy: string[] = [];
     let running = 0, stopped = 0, error = 0;

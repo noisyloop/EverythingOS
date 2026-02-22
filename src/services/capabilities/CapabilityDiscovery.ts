@@ -120,7 +120,7 @@ export class CapabilityDiscovery {
 
     // Get agents this agent can delegate to (all other running agents)
     const canDelegate = agentRegistry.getAll()
-      .filter(a => a.id !== agentId && a.status === 'running')
+      .filter(a => a.id !== agentId && a.getStatus() === 'running')
       .map(a => a.id);
 
     return {
@@ -220,11 +220,11 @@ export class CapabilityDiscovery {
       };
     }
 
-    if (agent.status !== 'running') {
+    if (agent.getStatus() !== 'running') {
       return {
         available: false,
         status: 'unavailable',
-        reason: `Agent not running (status: ${agent.status})`,
+        reason: `Agent not running (status: ${agent.getStatus()})`,
       };
     }
 
@@ -320,12 +320,12 @@ export class CapabilityDiscovery {
     return agentRegistry.getAll().map(agent => ({
       type: 'agent' as const,
       name: agent.id,
-      description: agent.config.description,
-      status: agent.status === 'running' ? 'available' as const : 'unavailable' as const,
-      reason: agent.status !== 'running' ? `Agent status: ${agent.status}` : undefined,
+      description: agent.getConfig().description,
+      status: agent.getStatus() === 'running' ? 'available' as const : 'unavailable' as const,
+      reason: agent.getStatus() !== 'running' ? `Agent status: ${agent.getStatus()}` : undefined,
       metadata: {
-        type: agent.config.type,
-        tags: agent.config.tags,
+        type: agent.getConfig().type,
+        tags: agent.getConfig().tags,
       },
     }));
   }

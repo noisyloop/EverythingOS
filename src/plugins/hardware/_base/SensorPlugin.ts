@@ -174,7 +174,7 @@ export abstract class SensorPlugin<T = unknown> {
 
     try {
       // Read raw data
-      let data = await this.readRaw();
+      let data = await this.readRaw() as T;
       
       // Validate
       if (!this.validateReading(data)) {

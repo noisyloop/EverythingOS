@@ -9,7 +9,7 @@ import {
   MemoryQuery,
   MemoryResult,
   MemoryFilter,
-} from '../MemoryTypes';
+} from './MemoryTypes';
 
 export class InMemoryAdapter implements MemoryAdapter {
   readonly name = 'in-memory';
@@ -138,7 +138,7 @@ export class InMemoryAdapter implements MemoryAdapter {
     // Tags filter (any match)
     if (filter.tags && filter.tags.length > 0) {
       if (!entry.metadata.tags) return false;
-      if (!filter.tags.some(t => entry.metadata.tags!.includes(t))) return false;
+      if (!filter.tags.some((t: string) => entry.metadata.tags!.includes(t))) return false;
     }
     
     // Time range

@@ -38,11 +38,11 @@ export class RobotAgent extends Agent {
   protected async onStart(): Promise<void> {
     this.robot.start();
 
-    this.subscribe('robot:collision', (e) => this.handleCollision(e.payload));
-    this.subscribe('robot:danger:zone', (e) => this.handleDanger(e.payload));
-    this.subscribe('robot:goal:reached', (e) => this.handleGoalReached(e.payload));
-    this.subscribe('robot:command:move', (e) => this.handleMoveCommand(e.payload));
-    this.subscribe('robot:command:goto', (e) => this.handleGotoCommand(e.payload));
+    this.subscribe<{ id: string; reason: string }>('robot:collision', (e) => this.handleCollision(e.payload));
+    this.subscribe<{ id: string }>('robot:danger:zone', (e) => this.handleDanger(e.payload));
+    this.subscribe<{ id: string }>('robot:goal:reached', (e) => this.handleGoalReached(e.payload));
+    this.subscribe<{ direction: string }>('robot:command:move', (e) => this.handleMoveCommand(e.payload));
+    this.subscribe<{ position: Position }>('robot:command:goto', (e) => this.handleGotoCommand(e.payload));
     this.subscribe('robot:command:patrol', () => this.handlePatrolCommand());
     this.subscribe('robot:command:stop', () => this.stopAll());
 

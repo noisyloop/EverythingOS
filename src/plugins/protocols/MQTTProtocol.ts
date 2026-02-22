@@ -5,7 +5,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 
 import { ProtocolBase, ProtocolConfig, ProtocolMessage } from './ProtocolBase';
-import { ConnectionConfig } from '../_base/HardwareTypes';
+import { ConnectionConfig } from '../hardware/_base/HardwareTypes';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MQTT Configuration
