@@ -141,7 +141,7 @@ export class SupervisorAgent {
       }
 
       // Check if agent is responsive
-      if (agent.status === 'running') {
+      if (agent.getStatus() === 'running') {
         // TODO: Implement ping/health check
         health.lastCheck = Date.now();
       }

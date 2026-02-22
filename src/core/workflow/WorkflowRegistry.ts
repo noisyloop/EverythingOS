@@ -76,7 +76,7 @@ export class WorkflowRegistry {
     if (!workflow) return false;
 
     workflow.status = 'active';
-    workflow.metadata = { ...workflow.metadata, updatedAt: Date.now() };
+    workflow.metadata = { createdAt: workflow.metadata?.createdAt ?? Date.now(), ...workflow.metadata, updatedAt: Date.now() };
     this.activateTriggers(workflow);
     eventBus.emit('workflow:activated', { workflowId });
     return true;
@@ -87,7 +87,7 @@ export class WorkflowRegistry {
     if (!workflow) return false;
 
     workflow.status = 'paused';
-    workflow.metadata = { ...workflow.metadata, updatedAt: Date.now() };
+    workflow.metadata = { createdAt: workflow.metadata?.createdAt ?? Date.now(), ...workflow.metadata, updatedAt: Date.now() };
     this.deactivateTriggers(workflowId);
     eventBus.emit('workflow:paused', { workflowId });
     return true;
@@ -98,7 +98,7 @@ export class WorkflowRegistry {
     if (!workflow) return false;
 
     workflow.status = 'archived';
-    workflow.metadata = { ...workflow.metadata, updatedAt: Date.now() };
+    workflow.metadata = { createdAt: workflow.metadata?.createdAt ?? Date.now(), ...workflow.metadata, updatedAt: Date.now() };
     this.deactivateTriggers(workflowId);
     eventBus.emit('workflow:archived', { workflowId });
     return true;

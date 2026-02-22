@@ -43,7 +43,7 @@ function initializeSecurity(): void {
     },
     getAgentState: (id: string) => {
       const agent = agentRegistry.get(id);
-      return agent ? { id: agent.id, status: agent.status, type: agent.config?.type } : {};
+      return agent ? { id: agent.id, status: agent.getStatus(), type: agent.getConfig()?.type } : {};
     },
     getAgentSubscriptions: (_id: string) => {
       // EventBus subscription list — return empty array if not exposed
@@ -160,7 +160,7 @@ async function route(
 
   // Agents
   if (path === '/api/agents') {
-    return { status: 200, data: agentRegistry.getAll().map(a => ({ id: a.id, config: a.config, status: a.status })) };
+    return { status: 200, data: agentRegistry.getAll().map(a => ({ id: a.id, config: a.getConfig(), status: a.getStatus() })) };
   }
 
   if (path.startsWith('/api/agents/')) {

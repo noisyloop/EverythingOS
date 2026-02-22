@@ -14,7 +14,7 @@ import { MQTTProtocol } from '../hardware/protocols/MQTTProtocol';
 
 export interface MeshConfig {
   nodeId: string;
-  transport: 'websocket' | 'mqtt' | 'hybrid';
+  transport?: 'websocket' | 'mqtt' | 'hybrid';
   
   // WebSocket (direct P2P)
   wsPort?: number;
@@ -487,7 +487,7 @@ export class MeshNetwork {
       nodeId: this.config.nodeId,
       peerCount: this.peers.size,
       connectedPeers: this.getConnectedPeers().length,
-      transport: this.config.transport,
+      transport: this.config.transport ?? 'mqtt',
     };
   }
 }

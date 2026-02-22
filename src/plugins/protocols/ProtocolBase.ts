@@ -5,7 +5,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 
 import { eventBus } from '../../core/event-bus/EventBus';
-import { ConnectionConfig, ProtocolType } from '../_base/HardwareTypes';
+import { ConnectionConfig, ProtocolType } from '../hardware/_base/HardwareTypes';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Protocol Types

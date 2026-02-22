@@ -345,14 +345,14 @@ export class IMUSensor extends SensorPlugin<IMUReading> {
     this.log('info', `Calibration complete. Accel offset: ${JSON.stringify(this.accelOffset)}, Gyro offset: ${JSON.stringify(this.gyroOffset)}`);
   }
 
-  getCalibrationOffsets(): { accel: typeof this.accelOffset; gyro: typeof this.gyroOffset } {
+  getCalibrationOffsets(): { accel: { x: number; y: number; z: number }; gyro: { x: number; y: number; z: number } } {
     return {
       accel: { ...this.accelOffset },
       gyro: { ...this.gyroOffset },
     };
   }
 
-  setCalibrationOffsets(offsets: { accel?: typeof this.accelOffset; gyro?: typeof this.gyroOffset }): void {
+  setCalibrationOffsets(offsets: { accel?: { x: number; y: number; z: number }; gyro?: { x: number; y: number; z: number } }): void {
     if (offsets.accel) this.accelOffset = offsets.accel;
     if (offsets.gyro) this.gyroOffset = offsets.gyro;
   }

@@ -75,6 +75,33 @@ export interface CUDAInfo {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Jetson Hardware Interface Types (implemented by Mock classes below)
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface JetsonGPIO {
+  setup(pin: number, mode: string): Promise<void>;
+  output(pin: number, value: 0 | 1): Promise<void>;
+  input(pin: number): Promise<0 | 1>;
+  pwmStart(pin: number, dutyCycle: number, frequency: number): Promise<void>;
+  pwmStop(pin: number): Promise<void>;
+  close(): Promise<void>;
+}
+
+interface JetsonCamera {
+  open(): Promise<void>;
+  close(): Promise<void>;
+  capture(): Promise<Buffer>;
+  startStream(callback: (frame: Buffer) => void): Promise<void>;
+  stopStream(): Promise<void>;
+}
+
+interface JetsonCUDA {
+  initialize(): Promise<void>;
+  getInfo(): Promise<CUDAInfo>;
+  runInference(modelPath: string, input: Buffer | Float32Array, inputShape: number[]): Promise<Float32Array>;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Jetson Platform Implementation
 // ─────────────────────────────────────────────────────────────────────────────
 

@@ -160,7 +160,7 @@ export class ShutdownAgent extends Agent {
     if (this.shutdownConfig.createSnapshot) {
       this.updatePhase('snapshot');
       try {
-        const snapshot = snapshotManager.takeSnapshot('pre-shutdown');
+        const snapshot = snapshotManager.create('pre-shutdown');
         this.log('info', `Snapshot created: ${snapshot.id}`);
         this.emit('shutdown:snapshot', { snapshotId: snapshot.id });
       } catch (error) {

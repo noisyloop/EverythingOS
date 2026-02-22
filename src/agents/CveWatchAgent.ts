@@ -27,7 +27,7 @@ import { execSync } from 'child_process';
 import { readFileSync, existsSync } from 'fs';
 import { Agent, AgentConfig } from '../runtime/Agent';
 import { AgentRiskTier } from '../types/agent-risk';
-import { safeGet } from './http-guard';
+import { safeGet } from '../security/http-guard';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types

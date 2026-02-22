@@ -138,6 +138,8 @@ export class DiscordBot {
 
     try {
       // Dynamic import discord.js (only when starting)
+      // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+      // @ts-ignore discord.js is an optional peer dependency
       const { Client, GatewayIntentBits, Events } = await import('discord.js');
       
       this.client = new Client({

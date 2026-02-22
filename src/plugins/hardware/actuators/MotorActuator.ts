@@ -155,7 +155,7 @@ export class MotorActuator extends ActuatorPlugin<number> {
         break;
         
       case 'home':
-        await this.home();
+        await this.homeMotor();
         break;
         
       case 'stop':
@@ -309,7 +309,7 @@ export class MotorActuator extends ActuatorPlugin<number> {
     this.log('debug', 'Motor disabled');
   }
 
-  private async home(): Promise<void> {
+  private async homeMotor(): Promise<void> {
     // Home using endstop or stall detection
     await this.serial.writeLine(`HOME ${this.motorConfig.motorId}`);
     this.isMoving = true;
