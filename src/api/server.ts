@@ -86,21 +86,34 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   try {
     const body = await parseBody(req);
     const result = await route(method, path, body, url.searchParams);
-    
+
     res.setHeader('Content-Type', 'application/json');
     res.writeHead(result.status);
     res.end(JSON.stringify(result.data));
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const status = message === 'Request body too large' ? 413 : 500;
     res.setHeader('Content-Type', 'application/json');
-    res.writeHead(500);
-    res.end(JSON.stringify({ error: String(error) }));
+    res.writeHead(status);
+    res.end(JSON.stringify({ error: message }));
   }
 }
 
+const MAX_BODY_SIZE = 1024 * 1024; // 1 MB limit to prevent resource exhaustion
+
 async function parseBody(req: IncomingMessage): Promise<unknown> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     let body = '';
-    req.on('data', chunk => body += chunk);
+    let size = 0;
+    req.on('data', (chunk: Buffer | string) => {
+      size += typeof chunk === 'string' ? Buffer.byteLength(chunk) : chunk.length;
+      if (size > MAX_BODY_SIZE) {
+        req.destroy();
+        reject(new Error('Request body too large'));
+        return;
+      }
+      body += chunk;
+    });
     req.on('end', () => {
       try {
         resolve(body ? JSON.parse(body) : {});
@@ -108,6 +121,7 @@ async function parseBody(req: IncomingMessage): Promise<unknown> {
         resolve({});
       }
     });
+    req.on('error', () => resolve({}));
   });
 }
 
@@ -191,6 +205,21 @@ async function route(
     const parts = path.split('/');
     const pluginId = parts[3];
     const actionName = parts[5];
+
+    // Validate identifiers to prevent unvalidated dynamic method calls
+    const idPattern = /^[a-zA-Z0-9_-]+$/;
+    if (!pluginId || !actionName || !idPattern.test(pluginId) || !idPattern.test(actionName)) {
+      return { status: 400, data: { error: 'Invalid plugin or action identifier' } };
+    }
+
+    // Verify the plugin and action exist before executing
+    if (!pluginRegistry.has(pluginId)) {
+      return { status: 404, data: { error: `Plugin not found: ${pluginId}` } };
+    }
+    if (!pluginRegistry.getAction(pluginId, actionName)) {
+      return { status: 404, data: { error: `Action not found: ${pluginId}:${actionName}` } };
+    }
+
     const result = await pluginRegistry.execute(pluginId, actionName, body);
     return { status: 200, data: result };
   }
@@ -198,6 +227,13 @@ async function route(
   // Events
   if (path === '/api/events' && method === 'POST') {
     const { type, payload } = body as { type: string; payload: unknown };
+    if (!type || typeof type !== 'string' || type.length > 256) {
+      return { status: 400, data: { error: 'Invalid or missing event type' } };
+    }
+    // Block internal/security event types from external emission
+    if (type.startsWith('system:') || type.startsWith('security:') || type.startsWith('audit:')) {
+      return { status: 403, data: { error: 'Cannot emit internal event types via API' } };
+    }
     eventBus.emit(type, payload);
     return { status: 200, data: { success: true } };
   }

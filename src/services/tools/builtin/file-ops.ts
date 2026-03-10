@@ -16,12 +16,39 @@ export function setSandboxDirectory(dir: string): void {
 
 function isPathSafe(filePath: string): boolean {
   const resolved = path.resolve(sandboxDir, filePath);
-  return resolved.startsWith(sandboxDir);
+  // Use separator-aware check to prevent prefix confusion (e.g. /data vs /data-private)
+  return resolved === sandboxDir || resolved.startsWith(sandboxDir + path.sep);
+}
+
+async function resolveSafePathAsync(filePath: string): Promise<string> {
+  const resolved = path.resolve(sandboxDir, filePath);
+  if (resolved !== sandboxDir && !resolved.startsWith(sandboxDir + path.sep)) {
+    throw new Error('Path traversal attempt blocked');
+  }
+
+  // Resolve symlinks to their real path to prevent sandbox escape via symlinks
+  try {
+    const real = await fs.realpath(resolved);
+    if (real !== sandboxDir && !real.startsWith(sandboxDir + path.sep)) {
+      throw new Error('Path traversal attempt blocked (symlink escape)');
+    }
+    return real;
+  } catch (err) {
+    // File may not exist yet (e.g. for writes); validate the parent directory instead
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      const parentReal = await fs.realpath(path.dirname(resolved));
+      if (parentReal !== sandboxDir && !parentReal.startsWith(sandboxDir + path.sep)) {
+        throw new Error('Path traversal attempt blocked (symlink escape)');
+      }
+      return path.join(parentReal, path.basename(resolved));
+    }
+    throw err;
+  }
 }
 
 function resolveSafePath(filePath: string): string {
   const resolved = path.resolve(sandboxDir, filePath);
-  if (!resolved.startsWith(sandboxDir)) {
+  if (resolved !== sandboxDir && !resolved.startsWith(sandboxDir + path.sep)) {
     throw new Error('Path traversal attempt blocked');
   }
   return resolved;
@@ -52,9 +79,9 @@ export const fileReadTool: Tool = {
   
   handler: async (input, context): Promise<ToolResult> => {
     const { path: filePath, encoding = 'utf-8' } = input as { path: string; encoding?: BufferEncoding };
-    
+
     try {
-      const safePath = resolveSafePath(filePath);
+      const safePath = await resolveSafePathAsync(filePath);
       const content = await fs.readFile(safePath, { encoding });
       
       context.log('info', `Read file: ${filePath}`);
@@ -111,8 +138,8 @@ export const fileWriteTool: Tool = {
     };
     
     try {
-      const safePath = resolveSafePath(filePath);
-      
+      const safePath = await resolveSafePathAsync(filePath);
+
       // Ensure directory exists
       await fs.mkdir(path.dirname(safePath), { recursive: true });
       
@@ -169,7 +196,7 @@ export const fileListTool: Tool = {
     };
     
     try {
-      const safePath = resolveSafePath(dirPath);
+      const safePath = await resolveSafePathAsync(dirPath);
       
       async function listDir(dir: string, prefix = ''): Promise<string[]> {
         const entries = await fs.readdir(dir, { withFileTypes: true });
@@ -235,11 +262,11 @@ export const fileDeleteTool: Tool = {
     const { path: filePath } = input as { path: string };
     
     try {
-      const safePath = resolveSafePath(filePath);
-      
+      const safePath = await resolveSafePathAsync(filePath);
+
       // Check it exists first
       await fs.access(safePath);
-      
+
       // Delete
       await fs.unlink(safePath);
       

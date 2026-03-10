@@ -137,15 +137,28 @@ export class PluginRegistry {
       throw new Error(`Plugin ${pluginId} is not allowed to invoke actions`);
     }
 
+    // Validate input against schema if defined
+    if (action.schema) {
+      if (input !== null && typeof input === 'object') {
+        const inputObj = input as Record<string, unknown>;
+        const required = (action.schema.required as string[]) ?? [];
+        for (const key of required) {
+          if (!(key in inputObj)) {
+            throw new Error(`Missing required input field '${key}' for action '${actionName}'`);
+          }
+        }
+      }
+    }
+
     // Get timeout from trust config
     const timeout = pluginTrustManager.getTimeout(pluginId);
-    
+
     const context = this.createContext(pluginId);
-    
+
     // Execute with timeout
     const result = await Promise.race([
       action.handler(input, context),
-      new Promise((_, reject) => 
+      new Promise((_, reject) =>
         setTimeout(() => reject(new Error(`Plugin action timeout: ${timeout}ms`)), timeout)
       ),
     ]);
