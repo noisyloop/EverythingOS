@@ -24,9 +24,24 @@ export interface MCPStdioConfig {
   cwd?: string;
 }
 
+// Allowlist of executables that may be spawned as MCP servers.
+// Extend this set as new server runtimes are approved.
+const ALLOWED_COMMANDS = new Set([
+  'node', 'python', 'python3', 'npx', 'uvx',
+  'deno', 'bun',
+]);
+
+function isCommandAllowed(command: string): boolean {
+  // Accept known short names (e.g. 'node') or absolute paths ending with them
+  const basename = command.split('/').pop() ?? command;
+  return ALLOWED_COMMANDS.has(basename);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Stdio Transport
 // ─────────────────────────────────────────────────────────────────────────────
+
+const MAX_LINE_BUFFER = 10 * 1024 * 1024; // 10 MB max buffer to prevent resource exhaustion
 
 export class MCPStdioTransport extends MCPTransportBase {
   private config: MCPStdioConfig;
@@ -47,6 +62,13 @@ export class MCPStdioTransport extends MCPTransportBase {
     if (this.status === 'connected') return;
     this.status = 'connecting';
 
+    // Validate command against allowlist before spawning
+    if (!isCommandAllowed(this.config.command)) {
+      throw new Error(
+        `MCP stdio: command '${this.config.command}' is not in the allowed executables list`
+      );
+    }
+
     return new Promise<void>((resolve, reject) => {
       const proc = spawn(this.config.command, this.config.args ?? [], {
         env: { ...process.env, ...(this.config.env ?? {}) },
@@ -57,6 +79,14 @@ export class MCPStdioTransport extends MCPTransportBase {
       // ── stdout: parse newline-delimited JSON ─────────────────────────────
       proc.stdout!.on('data', (chunk: Buffer) => {
         this.lineBuffer += chunk.toString('utf8');
+
+        // Guard against unbounded buffer growth (resource exhaustion)
+        if (this.lineBuffer.length > MAX_LINE_BUFFER) {
+          this.handleError(new Error('MCP stdio: line buffer exceeded maximum size'));
+          this.lineBuffer = '';
+          return;
+        }
+
         let newlineIdx: number;
         while ((newlineIdx = this.lineBuffer.indexOf('\n')) !== -1) {
           const line = this.lineBuffer.slice(0, newlineIdx).trim();
