@@ -144,6 +144,10 @@ export class WorkflowEngine {
     context: NodeContext,
     timeout?: number
   ): Promise<NodeResult> {
+    if (typeof handler !== 'function') {
+      throw new Error('Invalid node handler: expected function');
+    }
+
     if (!timeout) {
       return handler(node, context);
     }
