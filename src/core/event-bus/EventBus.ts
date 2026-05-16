@@ -30,6 +30,35 @@ export interface Subscription {
   once: boolean;
 }
 
+// Per-source publish rate limit — prevents a compromised or runaway agent from
+// flooding the bus and starving other agents.
+const PUBLISH_RATE_LIMIT   = 200;        // max publishes per window
+const PUBLISH_RATE_WINDOW  = 60_000;     // 60-second sliding window
+
+interface PublishRateEntry { count: number; windowStart: number }
+const publishRates = new Map<string, PublishRateEntry>();
+
+function checkPublishRateLimit(source: string): boolean {
+  const now = Date.now();
+  const entry = publishRates.get(source);
+
+  if (!entry || now - entry.windowStart > PUBLISH_RATE_WINDOW) {
+    publishRates.set(source, { count: 1, windowStart: now });
+    return true;
+  }
+  if (entry.count >= PUBLISH_RATE_LIMIT) return false;
+  entry.count++;
+  return true;
+}
+
+// Periodically purge stale rate limit entries to avoid unbounded memory growth
+setInterval(() => {
+  const cutoff = Date.now() - PUBLISH_RATE_WINDOW * 2;
+  for (const [src, entry] of publishRates) {
+    if (entry.windowStart < cutoff) publishRates.delete(src);
+  }
+}, 5 * 60_000);
+
 export class EventBus {
   private subscriptions: Map<string, Subscription[]> = new Map();
   private queue: PriorityQueue<Event>;
@@ -48,6 +77,15 @@ export class EventBus {
   // ─────────────────────────────────────────────────────────────────────────────
 
   emit<T>(type: string, payload: T, options: Partial<Omit<Event<T>, 'id' | 'type' | 'payload' | 'timestamp'>> = {}): string {
+    const source = options.source || 'system';
+    if (!checkPublishRateLimit(source)) {
+      throw new Error(
+        `[EventBus] Publish rate limit exceeded for source "${source}" ` +
+        `(${PUBLISH_RATE_LIMIT} events/${PUBLISH_RATE_WINDOW / 1000}s). ` +
+        `Agent may be flooding the bus.`
+      );
+    }
+
     const event: Event<T> = {
       id: this.generateId(),
       type,

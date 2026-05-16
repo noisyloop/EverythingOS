@@ -3,6 +3,10 @@
  *
  * NIST AI RMF 1.0 — MANAGE Function (MG-2.2)
  * NIST AI 600-1 — Prompt Injection (GV-6.2), Data Privacy (MS-2.5)
+ *
+ * Unicode normalization (NFKC) is applied before pattern matching to defeat
+ * lookalike-character and zero-width-character injection bypasses. The normalized
+ * text is what gets stored and forwarded — the original is only hashed for audit.
  */
 
 import { createHash } from 'crypto';
@@ -22,6 +26,28 @@ export interface PIIScrubResult {
 }
 
 const MAX_INPUT_LENGTH = 4000;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Unicode normalization — collapse lookalikes and invisible characters
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Normalize text before injection detection.
+ * Collapses Unicode lookalike characters (NFKC), strips zero-width characters
+ * that can fragment patterns invisibly, and collapses repeated whitespace.
+ * This is the text that pattern matching runs against and that gets forwarded.
+ */
+function normalizeForDetection(input: string): string {
+  return input
+    .normalize('NFKC')                                    // collapse Unicode lookalikes (е→e, ﬁ→fi, etc.)
+    .replace(/[​-‍⁠﻿­]/g, '')   // strip zero-width and soft-hyphen chars
+    .replace(/\s+/g, ' ')                                  // collapse whitespace
+    .trim();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Injection patterns
+// ─────────────────────────────────────────────────────────────────────────────
 
 const INJECTION_PATTERNS: Array<{ pattern: RegExp; name: string }> = [
   { pattern: /ignore\s+(all\s+)?(previous|prior|above)\s+instructions?/gi, name: 'ignore_previous' },
@@ -43,6 +69,10 @@ const INJECTION_PATTERNS: Array<{ pattern: RegExp; name: string }> = [
   { pattern: /grandma\s+(trick|exploit|hack)/gi, name: 'grandma_trick' },
   { pattern: /developer\s+mode/gi, name: 'developer_mode' },
 ];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PII patterns
+// ─────────────────────────────────────────────────────────────────────────────
 
 const PII_PATTERNS: Array<{ pattern: RegExp; replacement: string; category: string }> = [
   {
@@ -82,20 +112,24 @@ const PII_PATTERNS: Array<{ pattern: RegExp; replacement: string; category: stri
   },
 ];
 
-export function sanitizeInput(input: string, agentId: string): SanitizedInput {
-  if (typeof input !== 'string') {
-    input = String(input);
-  }
+// ─────────────────────────────────────────────────────────────────────────────
+// Public API
+// ─────────────────────────────────────────────────────────────────────────────
 
-  const originalHash = createHash('sha256').update(input).digest('hex');
-  const detectedPatterns: string[] = [];
-  let sanitized = input;
-  let injectionDetected = false;
+export function sanitizeInput(input: string, _agentId: string): SanitizedInput {
+  const raw = typeof input === 'string' ? input : String(input);
+  const originalHash = createHash('sha256').update(raw).digest('hex');
+
+  // Normalize first — this is the text we operate on and forward
+  let sanitized = normalizeForDetection(raw);
 
   const truncated = sanitized.length > MAX_INPUT_LENGTH;
   if (truncated) {
     sanitized = sanitized.slice(0, MAX_INPUT_LENGTH);
   }
+
+  const detectedPatterns: string[] = [];
+  let injectionDetected = false;
 
   for (const { pattern, name } of INJECTION_PATTERNS) {
     const before = sanitized;
@@ -104,6 +138,7 @@ export function sanitizeInput(input: string, agentId: string): SanitizedInput {
       detectedPatterns.push(name);
       injectionDetected = true;
     }
+    pattern.lastIndex = 0;
   }
 
   return { sanitized, originalHash, injectionDetected, detectedPatterns, truncated };
@@ -118,9 +153,7 @@ export function scrubPII(text: string): PIIScrubResult {
     const matches = scrubbed.match(pattern);
     if (matches) {
       piiInstancesFound += matches.length;
-      if (!piiCategories.includes(category)) {
-        piiCategories.push(category);
-      }
+      if (!piiCategories.includes(category)) piiCategories.push(category);
       scrubbed = scrubbed.replace(pattern, replacement);
     }
   }
@@ -137,6 +170,10 @@ export function prepareForLLM(
   return { sanitized, pii, finalText: pii.scrubbed };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Rate limiting
+// ─────────────────────────────────────────────────────────────────────────────
+
 const rateLimitCounters = new Map<string, { count: number; windowStart: number }>();
 
 export function checkRateLimit(agentId: string, limitPerMinute: number): boolean {
@@ -151,9 +188,7 @@ export function checkRateLimit(agentId: string, limitPerMinute: number): boolean
     return true;
   }
 
-  if (current.count >= limitPerMinute) {
-    return false;
-  }
+  if (current.count >= limitPerMinute) return false;
 
   current.count++;
   return true;

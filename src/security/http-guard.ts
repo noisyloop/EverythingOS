@@ -4,6 +4,8 @@
  * Fixes:
  *   CVE-2025-27152 — axios SSRF via absolute URL bypass (axios < 1.8.2)
  *   CVE-2025-58754 — axios DoS via unbounded data: URI memory allocation (axios < 1.11.0)
+ *   DNS rebinding — hostname validated at request time AND after DNS resolution
+ *   Redirect SSRF  — redirects disabled; a Location header cannot route to an internal IP
  *
  * NIST CSF 2.0: Protect (PR.PS-1, PR.PS-6)
  * NIST AI RMF: MANAGE (MG-2.2)
@@ -13,21 +15,6 @@
  *
  * ESLint rule to add to eslint.config.js:
  *   "no-restricted-imports": ["error", { "paths": ["axios"] }]
- *
- * Usage:
- *   import { createHttpClient, safeGet, safePost } from '../security/http-guard';
- *
- *   // For LLM provider calls:
- *   const client = createHttpClient({
- *     allowedHosts: ['api.anthropic.com', 'api.openai.com'],
- *     maxResponseBytes: 1_000_000,
- *   });
- *   const res = await client.get('/v1/messages');
- *
- *   // For plugin calls (Discord, Slack, etc.):
- *   const res = await safeGet('https://discord.com/api/v10/channels/123', {
- *     allowedHosts: ['discord.com'],
- *   });
  */
 
 import axios, {
@@ -36,71 +23,49 @@ import axios, {
   InternalAxiosRequestConfig,
   AxiosResponse,
 } from 'axios';
+import { resolve4, resolve6 } from 'dns/promises';
 import { AuditLogger } from './audit-log';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Constants
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Default max response size: 10 MB */
 const DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
-
-/** Default timeout: 30 seconds */
 const DEFAULT_TIMEOUT_MS = 30_000;
 
-/** Blocked URL schemes — CVE-2025-58754 mitigation */
 const BLOCKED_SCHEMES = ['data:', 'file:', 'ftp:', 'javascript:', 'vbscript:'];
 
-/** Blocked internal IP ranges — SSRF mitigation for CVE-2025-27152 */
 const BLOCKED_IP_PATTERNS = [
-  /^127\./,           // loopback
-  /^10\./,            // RFC1918
-  /^172\.(1[6-9]|2[0-9]|3[01])\./,  // RFC1918
-  /^192\.168\./,      // RFC1918
-  /^169\.254\./,      // link-local
-  /^::1$/,            // IPv6 loopback
-  /^fc00:/,           // IPv6 ULA
-  /^fe80:/,           // IPv6 link-local
-  /^0\.0\.0\.0$/,     // invalid
+  /^127\./,
+  /^10\./,
+  /^172\.(1[6-9]|2[0-9]|3[01])\./,
+  /^192\.168\./,
+  /^169\.254\./,
+  /^::1$/,
+  /^fc00:/i,
+  /^fe80:/i,
+  /^0\.0\.0\.0$/,
+  /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./,  // RFC 6598 shared address space
 ];
 
-/** Hostnames always blocked regardless of allowlist */
-const BLOCKED_HOSTNAMES = [
+const BLOCKED_HOSTNAMES = new Set([
   'localhost',
-  'metadata.google.internal',  // GCP metadata service
-  '169.254.169.254',           // AWS/Azure IMDS
-  '100.100.100.200',           // Alibaba Cloud metadata
-];
+  'metadata.google.internal',
+  '169.254.169.254',
+  '100.100.100.200',
+  'metadata.azure.internal',
+]);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface HttpGuardOptions {
-  /**
-   * Allowlist of hostnames this client may connect to.
-   * If provided, requests to any other host are blocked.
-   * Example: ['api.anthropic.com', 'api.openai.com']
-   */
   allowedHosts?: string[];
-
-  /**
-   * Maximum response body size in bytes. Requests exceeding this are aborted.
-   * Fixes CVE-2025-58754 (unbounded memory from data: URIs).
-   * Default: 10 MB
-   */
   maxResponseBytes?: number;
-
-  /** Request timeout in milliseconds. Default: 30s */
   timeoutMs?: number;
-
-  /** Agent ID for audit logging. Defaults to 'http-guard' */
   agentId?: string;
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// URL Validation
-// ─────────────────────────────────────────────────────────────────────────────
 
 export class SSRFError extends Error {
   constructor(message: string) {
@@ -109,12 +74,64 @@ export class SSRFError extends Error {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// IP validation helper (used for both static hostname checks and DNS results)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function assertIpNotBlocked(ip: string): void {
+  const normalized = ip.toLowerCase();
+  if (BLOCKED_HOSTNAMES.has(normalized)) {
+    throw new SSRFError(`Blocked hostname/IP (SSRF): ${ip}`);
+  }
+  for (const pattern of BLOCKED_IP_PATTERNS) {
+    if (pattern.test(normalized)) {
+      throw new SSRFError(`Blocked internal IP (SSRF): ${ip}`);
+    }
+  }
+}
+
+function looksLikeIp(hostname: string): boolean {
+  return /^\d{1,3}(\.\d{1,3}){3}$/.test(hostname) ||
+         (/^[0-9a-fA-F:]+$/.test(hostname) && hostname.includes(':'));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DNS rebinding protection
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
- * Validates a URL against SSRF and scheme-injection risks.
- * Throws SSRFError if the URL is unsafe.
+ * Resolve the hostname and validate every returned IP is not in a blocked range.
+ * Prevents DNS rebinding: attacker advertises an allowed hostname that later
+ * resolves to an internal IP at TCP connect time.
+ *
+ * Skipped for hostnames that are already IP literals (already validated statically).
  */
+async function resolveAndValidateHost(hostname: string): Promise<void> {
+  if (looksLikeIp(hostname)) return; // already validated statically by validateUrl
+
+  let ips4: string[] = [];
+  let ips6: string[] = [];
+
+  try {
+    ips4 = await resolve4(hostname);
+  } catch { /* NXDOMAIN or timeout — let the request fail naturally */ }
+
+  try {
+    ips6 = await resolve6(hostname);
+  } catch { /* same */ }
+
+  // If we got no IPs at all, the request will fail at connect — that's fine.
+  // We only block if we positively identify a resolved IP as internal.
+  for (const ip of [...ips4, ...ips6]) {
+    assertIpNotBlocked(ip);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// URL validation (static — scheme, hostname, allowlist)
+// ─────────────────────────────────────────────────────────────────────────────
+
 export function validateUrl(url: string, allowedHosts?: string[]): URL {
-  // Reject blocked schemes — CVE-2025-58754
   const urlLower = url.toLowerCase().trimStart();
   for (const scheme of BLOCKED_SCHEMES) {
     if (urlLower.startsWith(scheme)) {
@@ -122,7 +139,6 @@ export function validateUrl(url: string, allowedHosts?: string[]): URL {
     }
   }
 
-  // Must be parseable as a URL
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -130,26 +146,19 @@ export function validateUrl(url: string, allowedHosts?: string[]): URL {
     throw new SSRFError(`Invalid URL: ${url}`);
   }
 
-  // Only allow http/https
   if (!['http:', 'https:'].includes(parsed.protocol)) {
     throw new SSRFError(`Blocked protocol: ${parsed.protocol}`);
   }
 
   const hostname = parsed.hostname.toLowerCase();
 
-  // Block always-blocked hostnames
-  if (BLOCKED_HOSTNAMES.includes(hostname)) {
+  if (BLOCKED_HOSTNAMES.has(hostname)) {
     throw new SSRFError(`Blocked hostname (SSRF): ${hostname}`);
   }
 
-  // Block internal IP ranges — CVE-2025-27152
-  for (const pattern of BLOCKED_IP_PATTERNS) {
-    if (pattern.test(hostname)) {
-      throw new SSRFError(`Blocked internal IP (SSRF): ${hostname}`);
-    }
-  }
+  // Static IP range check (catches IP literals in the URL)
+  assertIpNotBlocked(hostname);
 
-  // Enforce allowlist if provided
   if (allowedHosts && allowedHosts.length > 0) {
     const hostAllowed = allowedHosts.some(
       (allowed) => hostname === allowed.toLowerCase() || hostname.endsWith(`.${allowed.toLowerCase()}`)
@@ -165,16 +174,9 @@ export function validateUrl(url: string, allowedHosts?: string[]): URL {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Hardened Axios Instance Factory
+// Hardened axios instance factory
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Creates a hardened axios instance with SSRF protection and content limits.
- *
- * Fixes:
- *   - CVE-2025-27152: validates absolute URLs against SSRF patterns
- *   - CVE-2025-58754: enforces maxContentLength and maxBodyLength
- */
 export function createHttpClient(options: HttpGuardOptions = {}): AxiosInstance {
   const {
     allowedHosts,
@@ -185,22 +187,21 @@ export function createHttpClient(options: HttpGuardOptions = {}): AxiosInstance 
 
   const instance = axios.create({
     timeout: timeoutMs,
-    // CVE-2025-58754 fix — enforce content size limits
-    maxContentLength: maxResponseBytes,
-    maxBodyLength: maxResponseBytes,
-    // CVE-2025-27152 fix — disallow absolute URL override of baseURL
-    // (axios 1.8.2+ respects this, older versions ignored it)
-    allowAbsoluteUrls: false,
+    maxContentLength: maxResponseBytes,   // CVE-2025-58754
+    maxBodyLength: maxResponseBytes,       // CVE-2025-58754
+    allowAbsoluteUrls: false,             // CVE-2025-27152
+    maxRedirects: 0,                      // Disable redirect following to prevent redirect-based SSRF
   });
 
-  // Request interceptor — validate URL before every request
-  instance.interceptors.request.use((config: InternalAxiosRequestConfig) => {
+  // Async request interceptor — static URL validation + DNS rebinding check
+  instance.interceptors.request.use(async (config: InternalAxiosRequestConfig) => {
     const url = config.url ?? '';
     const baseURL = config.baseURL ?? '';
     const fullUrl = url.startsWith('http') ? url : `${baseURL}${url}`;
 
+    let parsed: URL;
     try {
-      validateUrl(fullUrl, allowedHosts);
+      parsed = validateUrl(fullUrl, allowedHosts);
     } catch (err) {
       const msg = err instanceof SSRFError ? err.message : String(err);
       AuditLogger.log({
@@ -211,10 +212,22 @@ export function createHttpClient(options: HttpGuardOptions = {}): AxiosInstance 
       throw err;
     }
 
+    // DNS rebinding check — resolves the hostname and validates all returned IPs
+    try {
+      await resolveAndValidateHost(parsed.hostname);
+    } catch (err) {
+      const msg = err instanceof SSRFError ? err.message : String(err);
+      AuditLogger.log({
+        agentId,
+        event: 'security.injection_detected',
+        metadata: { type: 'dns_rebind_blocked', hostname: parsed.hostname, reason: msg },
+      });
+      throw err;
+    }
+
     return config;
   });
 
-  // Response interceptor — log large responses
   instance.interceptors.response.use((response: AxiosResponse) => {
     const contentLength = Number(response.headers['content-length'] ?? 0);
     if (contentLength > maxResponseBytes * 0.8) {
@@ -231,13 +244,9 @@ export function createHttpClient(options: HttpGuardOptions = {}): AxiosInstance 
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Convenience wrappers for one-off calls
+// Convenience wrappers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Safe GET — validates URL before making request.
- * Use for one-off calls where you don't need a persistent client.
- */
 export async function safeGet<T = unknown>(
   url: string,
   options: HttpGuardOptions & AxiosRequestConfig = {},
@@ -247,9 +256,6 @@ export async function safeGet<T = unknown>(
   return client.get<T>(url, axiosConfig);
 }
 
-/**
- * Safe POST — validates URL before making request.
- */
 export async function safePost<T = unknown>(
   url: string,
   data?: unknown,
@@ -261,31 +267,27 @@ export async function safePost<T = unknown>(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Pre-configured clients for known EverythingOS integrations
+// Pre-configured clients for known integrations
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Hardened client for Anthropic API calls */
 export const anthropicClient = createHttpClient({
   allowedHosts: ['api.anthropic.com'],
-  maxResponseBytes: 2 * 1024 * 1024, // 2 MB — LLM responses should never exceed this
+  maxResponseBytes: 2 * 1024 * 1024,
   agentId: 'llm-router:anthropic',
 });
 
-/** Hardened client for OpenAI API calls */
 export const openaiClient = createHttpClient({
   allowedHosts: ['api.openai.com'],
   maxResponseBytes: 2 * 1024 * 1024,
   agentId: 'llm-router:openai',
 });
 
-/** Hardened client for Discord API calls */
 export const discordClient = createHttpClient({
   allowedHosts: ['discord.com', 'discordapp.com', 'cdn.discordapp.com'],
   maxResponseBytes: 10 * 1024 * 1024,
   agentId: 'plugin:discord',
 });
 
-/** Hardened client for Slack API calls */
 export const slackClient = createHttpClient({
   allowedHosts: ['slack.com', 'api.slack.com', 'hooks.slack.com'],
   maxResponseBytes: 10 * 1024 * 1024,
