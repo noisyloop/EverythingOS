@@ -5,11 +5,12 @@
  * NIST AI 600-1 — Prompt Injection, Data Privacy, Harmful Content
  */
 
+import { randomBytes } from 'crypto';
 import { AgentRiskConfig, AgentRiskTier, resolveRiskConfig, requiresSanitization } from '../types/agent-risk';
 import { sanitizeInput, scrubPII, checkRateLimit, SanitizedInput } from '../security/sanitize';
 import { filterOutput, FilterResult } from '../security/content-filter';
 import { AuditLogger, hashContent } from '../security/audit-log';
-import { AgentAuthManager, AgentToken } from '../security/agent-auth';
+import { AgentAuthManager, AgentToken, signCall } from '../security/agent-auth';
 import { DecisionLedger } from '../security/decision-ledger';
 import { eventBus } from '../core/event-bus/EventBus';
 import { llmRouter } from '../runtime/LLMRouter';
@@ -318,7 +319,10 @@ export abstract class Agent {
       throw new Error(`[Agent:${this.id}] Cannot emit — agent has no auth token. Is the agent started?`);
     }
 
-    const allowed = AgentAuthManager.canPublish(this.id, this._token.token, type);
+    const nonce = randomBytes(8).toString('hex');
+    const ts = Date.now();
+    const sig = signCall(this._token.callSigningKey, this.id, type, nonce, ts);
+    const allowed = AgentAuthManager.canPublish(this.id, sig, type, nonce, ts);
 
     if (!allowed) {
       throw new Error(
@@ -346,7 +350,10 @@ export abstract class Agent {
       throw new Error(`[Agent:${this.id}] Cannot subscribe — agent has no auth token. Is the agent started?`);
     }
 
-    const allowed = AgentAuthManager.canSubscribe(this.id, this._token.token, type);
+    const nonce = randomBytes(8).toString('hex');
+    const ts = Date.now();
+    const sig = signCall(this._token.callSigningKey, this.id, type, nonce, ts);
+    const allowed = AgentAuthManager.canSubscribe(this.id, sig, type, nonce, ts);
 
     if (!allowed) {
       throw new Error(

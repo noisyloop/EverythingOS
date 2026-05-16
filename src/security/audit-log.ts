@@ -5,23 +5,16 @@
  * NIST AI 600-1 — Accountability, Explainability
  *
  * Produces a hash-chained log where each entry includes the SHA-256 hash
- * of the previous entry. This means tampering with any entry invalidates
- * all subsequent hashes and is detectable via verifyChain().
+ * of the previous entry. Tampering with any entry invalidates all subsequent
+ * hashes and is detectable via verifyChain().
  *
- * Usage:
- *   import { AuditLogger } from '../security/audit-log';
- *
- *   AuditLogger.log({
- *     agentId: 'my-agent',
- *     action: 'llm.call',
- *     inputHash: hash,
- *     outputHash: hash,
- *     metadata: { channel: 'discord:message' }
- *   });
+ * Disk writes are fully async (WriteStream) to prevent blocking the Node.js
+ * event loop under audit load. Call flushAuditLog() before verifyChain() or
+ * process exit to ensure all pending writes reach disk.
  */
 
 import { createHash } from 'crypto';
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'fs';
+import { createWriteStream, existsSync, readFileSync, WriteStream, writeFileSync } from 'fs';
 import { resolve } from 'path';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -58,25 +51,15 @@ export type AuditEventType =
   | 'incident.detected';
 
 export interface AuditEntry {
-  /** Monotonically increasing sequence number */
   seq: number;
-  /** ISO 8601 timestamp */
   timestamp: string;
-  /** Unix timestamp in ms for precise ordering */
   timestampMs: number;
-  /** Agent that generated this event */
   agentId: string;
-  /** Event category */
   event: AuditEventType;
-  /** SHA-256 hash of input content (never log raw content) */
   inputHash?: string;
-  /** SHA-256 hash of output content */
   outputHash?: string;
-  /** Additional structured metadata */
   metadata?: Record<string, unknown>;
-  /** Hash of the previous audit entry — chain link */
   previousHash: string;
-  /** Hash of this entry (computed after all other fields are set) */
   entryHash: string;
 }
 
@@ -96,7 +79,7 @@ export interface ChainVerificationResult {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// In-Memory Store (ring buffer for runtime queries)
+// In-memory store (ring buffer for runtime queries)
 // ─────────────────────────────────────────────────────────────────────────────
 
 const IN_MEMORY_LIMIT = 10_000;
@@ -107,18 +90,52 @@ let lastHash = 'GENESIS';
 const LOG_FILE_PATH = resolve(process.env.AUDIT_LOG_PATH ?? './everythingos-audit.jsonl');
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Core Logger
+// Async write stream — non-blocking disk I/O
 // ─────────────────────────────────────────────────────────────────────────────
 
-function computeEntryHash(entry: Omit<AuditEntry, 'entryHash'>): string {
-  const content = JSON.stringify(entry);
-  return createHash('sha256').update(content).digest('hex');
+let logStream: WriteStream | null = null;
+
+function getLogStream(): WriteStream {
+  if (!logStream || logStream.destroyed) {
+    logStream = createWriteStream(LOG_FILE_PATH, { flags: 'a', encoding: 'utf8' });
+    logStream.on('error', (err) => {
+      // Never throw from the audit stream error handler — log to stderr instead
+      console.error('[AuditLogger] Write stream error:', err);
+    });
+  }
+  return logStream;
 }
 
 /**
- * Hash a string value for inclusion in the audit log.
- * Use this to log input/output content without storing the raw content.
+ * Flush all pending audit writes to disk.
+ * Call before process exit or before running verifyChain() on a live system.
  */
+export function flushAuditLog(): Promise<void> {
+  return new Promise((res) => {
+    if (!logStream || logStream.destroyed) {
+      res();
+      return;
+    }
+    logStream.end(() => {
+      logStream = null;
+      res();
+    });
+  });
+}
+
+// Flush on clean shutdown
+process.once('exit', () => { if (logStream && !logStream.destroyed) logStream.end(); });
+process.once('SIGINT', async () => { await flushAuditLog(); process.exit(0); });
+process.once('SIGTERM', async () => { await flushAuditLog(); process.exit(0); });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Core logger
+// ─────────────────────────────────────────────────────────────────────────────
+
+function computeEntryHash(entry: Omit<AuditEntry, 'entryHash'>): string {
+  return createHash('sha256').update(JSON.stringify(entry)).digest('hex');
+}
+
 export function hashContent(content: string): string {
   return createHash('sha256').update(content).digest('hex');
 }
@@ -126,8 +143,7 @@ export function hashContent(content: string): string {
 export const AuditLogger = {
   /**
    * Append an entry to the audit log.
-   * This is the primary logging function — all security-relevant events
-   * should flow through here.
+   * In-memory bookkeeping is synchronous; disk write is async (non-blocking).
    */
   log(input: AuditLogInput): AuditEntry {
     const now = new Date();
@@ -146,30 +162,22 @@ export const AuditLogger = {
     const entryHash = computeEntryHash(partial);
     const entry: AuditEntry = { ...partial, entryHash };
 
-    // Update chain
     lastHash = entryHash;
 
-    // In-memory ring buffer
     if (auditLog.length >= IN_MEMORY_LIMIT) {
       auditLog.shift();
     }
     auditLog.push(entry);
 
-    // Append to file (append-only — never overwrite)
-    try {
-      appendFileSync(LOG_FILE_PATH, JSON.stringify(entry) + '\n', { encoding: 'utf8' });
-    } catch (err) {
-      // Log to stderr but don't throw — audit log failure must not crash the system
-      console.error('[AuditLogger] Failed to write to log file:', err);
-    }
+    // Non-blocking async disk write
+    const stream = getLogStream();
+    stream.write(JSON.stringify(entry) + '\n', (err) => {
+      if (err) console.error('[AuditLogger] Failed to write audit entry seq=' + entry.seq + ':', err);
+    });
 
     return entry;
   },
 
-  /**
-   * Query the in-memory log with optional filters.
-   * For larger historical queries, read from the log file directly.
-   */
   query(filter: {
     agentId?: string;
     event?: AuditEventType;
@@ -178,30 +186,17 @@ export const AuditLogger = {
     limit?: number;
   }): AuditEntry[] {
     let results = [...auditLog];
-
-    if (filter.agentId) {
-      results = results.filter((e) => e.agentId === filter.agentId);
-    }
-    if (filter.event) {
-      results = results.filter((e) => e.event === filter.event);
-    }
-    if (filter.since) {
-      results = results.filter((e) => e.timestampMs >= filter.since!);
-    }
-    if (filter.until) {
-      results = results.filter((e) => e.timestampMs <= filter.until!);
-    }
-    if (filter.limit) {
-      results = results.slice(-filter.limit);
-    }
-
+    if (filter.agentId) results = results.filter((e) => e.agentId === filter.agentId);
+    if (filter.event)   results = results.filter((e) => e.event === filter.event);
+    if (filter.since)   results = results.filter((e) => e.timestampMs >= filter.since!);
+    if (filter.until)   results = results.filter((e) => e.timestampMs <= filter.until!);
+    if (filter.limit)   results = results.slice(-filter.limit);
     return results;
   },
 
   /**
-   * Verify the integrity of the on-disk audit log.
-   * Returns true if the hash chain is unbroken.
-   * A broken chain indicates tampering or corruption.
+   * Verify the on-disk audit log's hash chain.
+   * Always call flushAuditLog() first on a live system to ensure all writes are flushed.
    */
   verifyChain(filePath?: string): ChainVerificationResult {
     const path = filePath ?? LOG_FILE_PATH;
@@ -221,15 +216,9 @@ export const AuditLogger = {
       try {
         entry = JSON.parse(lines[i]) as AuditEntry;
       } catch {
-        return {
-          valid: false,
-          totalEntries: lines.length,
-          brokenAt: i,
-          reason: `JSON parse error at line ${i + 1}`,
-        };
+        return { valid: false, totalEntries: lines.length, brokenAt: i, reason: `JSON parse error at line ${i + 1}` };
       }
 
-      // Verify previous hash link
       if (entry.previousHash !== previousHash) {
         return {
           valid: false,
@@ -239,7 +228,6 @@ export const AuditLogger = {
         };
       }
 
-      // Verify entry hash
       const { entryHash, ...rest } = entry;
       const expectedHash = computeEntryHash(rest);
       if (expectedHash !== entryHash) {
@@ -257,9 +245,6 @@ export const AuditLogger = {
     return { valid: true, totalEntries: lines.length };
   },
 
-  /**
-   * Returns a summary of log statistics for monitoring dashboards.
-   */
   stats(): {
     totalInMemory: number;
     lastSequence: number;
@@ -282,8 +267,8 @@ export const AuditLogger = {
   },
 
   /**
-   * Initialize the logger — loads the last hash from disk to continue the chain
-   * across process restarts. Call this once at startup before any agents start.
+   * Resume the hash chain from the last persisted entry.
+   * Call once at startup before any agents start.
    */
   initialize(): void {
     if (!existsSync(LOG_FILE_PATH)) {
@@ -314,5 +299,4 @@ export const AuditLogger = {
   },
 };
 
-// Auto-initialize on import
 AuditLogger.initialize();

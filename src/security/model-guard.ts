@@ -44,7 +44,7 @@
  *   // Store hash in DecisionLedger.buildContext() as modelId
  */
 
-import { createHash } from 'crypto';
+import { createHash, createHmac, timingSafeEqual } from 'crypto';
 import { createReadStream } from 'fs';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { resolve } from 'path';
@@ -165,10 +165,36 @@ const FINGERPRINT_DIR = resolve(
   process.env.MODEL_GUARD_DIR ?? './model-guard'
 );
 const FINGERPRINT_INDEX = resolve(FINGERPRINT_DIR, 'fingerprints.json');
-const VIOLATION_LOG = resolve(FINGERPRINT_DIR, 'violations.jsonl');
+const FINGERPRINT_SIG   = resolve(FINGERPRINT_DIR, 'fingerprints.sig');
+const VIOLATION_LOG     = resolve(FINGERPRINT_DIR, 'violations.jsonl');
+
+// Reuse EOS_AGENT_SECRET to sign the fingerprint baseline. If an attacker can
+// modify the baseline JSON they also need the secret to forge a valid signature.
+const FINGERPRINT_SIGNING_KEY: string = (() => {
+  const key = process.env.EOS_AGENT_SECRET;
+  if (!key) {
+    // In dev, use a stable derived key so the baseline survives restarts
+    return createHmac('sha256', 'dev-model-guard').update('fingerprint-baseline').digest('hex');
+  }
+  return key;
+})();
 
 function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+function signFingerprintIndex(index: Record<string, FingerprintRecord>): string {
+  return createHmac('sha256', FINGERPRINT_SIGNING_KEY)
+    .update(JSON.stringify(index))
+    .digest('hex');
+}
+
+function verifyFingerprintSignature(index: Record<string, FingerprintRecord>): boolean {
+  if (!existsSync(FINGERPRINT_SIG)) return false; // first run — no baseline yet
+  const storedSig = readFileSync(FINGERPRINT_SIG, 'utf8').trim();
+  const expected  = signFingerprintIndex(index);
+  if (storedSig.length !== 64 || expected.length !== 64) return false;
+  return timingSafeEqual(Buffer.from(storedSig, 'hex'), Buffer.from(expected, 'hex'));
 }
 
 function ensureDir(): void {
@@ -181,7 +207,21 @@ function loadFingerprintIndex(): Record<string, FingerprintRecord> {
   ensureDir();
   if (!existsSync(FINGERPRINT_INDEX)) return {};
   try {
-    return JSON.parse(readFileSync(FINGERPRINT_INDEX, 'utf8'));
+    const index = JSON.parse(readFileSync(FINGERPRINT_INDEX, 'utf8')) as Record<string, FingerprintRecord>;
+    // Verify HMAC signature — detects file tampering
+    if (existsSync(FINGERPRINT_SIG) && !verifyFingerprintSignature(index)) {
+      AuditLogger.log({
+        agentId: 'model-guard',
+        event: 'security.injection_detected',
+        metadata: { action: 'fingerprint_tamper_detected', reason: 'hmac_signature_mismatch' },
+      });
+      console.error(
+        '[ModelGuard] CRITICAL: fingerprints.json signature mismatch — file may have been tampered with. ' +
+        'Delete fingerprints.json and fingerprints.sig, then re-run fingerprinting.'
+      );
+      return {}; // refuse to use a tampered baseline
+    }
+    return index;
   } catch {
     return {};
   }
@@ -189,7 +229,9 @@ function loadFingerprintIndex(): Record<string, FingerprintRecord> {
 
 function saveFingerprintIndex(index: Record<string, FingerprintRecord>): void {
   ensureDir();
-  writeFileSync(FINGERPRINT_INDEX, JSON.stringify(index, null, 2), 'utf8');
+  const content = JSON.stringify(index, null, 2);
+  writeFileSync(FINGERPRINT_INDEX, content, 'utf8');
+  writeFileSync(FINGERPRINT_SIG, signFingerprintIndex(index), 'utf8');
 }
 
 function logViolation(violation: ModelGuardViolation): void {

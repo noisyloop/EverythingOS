@@ -4,29 +4,25 @@
  * NIST AI RMF 1.0 — MANAGE Function (MG-2.2), GOVERN Function (GV-2)
  * NIST AI 600-1 — Cybersecurity Attacks, Accountability
  *
- * Issues HMAC-signed tokens to agents at registration. All EventBus publish
- * calls must present a valid token. The token encodes the agent's declared
- * channel permissions, which are enforced at publish and subscribe time.
- *
- * Usage:
- *   import { AgentAuthManager } from '../security/agent-auth';
- *
- *   // At agent registration:
- *   const token = AgentAuthManager.issueToken(agentId, riskConfig);
- *
- *   // Before EventBus publish:
- *   const allowed = AgentAuthManager.canPublish(token, 'discord:message');
- *
- *   // Before EventBus subscribe:
- *   const allowed = AgentAuthManager.canSubscribe(token, 'user:*');
+ * Security model:
+ *   1. Each agent gets a session token (HMAC of agentId:issuedAt) at registration.
+ *   2. Every individual publish/subscribe call must present a per-call signature
+ *      derived from a per-agent callSigningKey, a fresh nonce, and a timestamp.
+ *      This prevents replay of captured tokens within their TTL window.
+ *   3. Used nonces are tracked in a 5-minute sliding window — exact replay is
+ *      immediately detected regardless of TTL.
+ *   4. Revocations are persisted to disk so they survive process restarts.
+ *      A quarantined agent cannot re-register after a crash.
  */
 
-import { createHmac, randomBytes } from 'crypto';
+import { createHmac, randomBytes, timingSafeEqual } from 'crypto';
+import { appendFileSync, existsSync, readFileSync } from 'fs';
+import { resolve } from 'path';
 import { AuditLogger } from './audit-log';
 import { AgentRiskConfig, AgentRiskTier } from '../types/agent-risk';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Secret Key — load from environment, never hardcode
+// Master secret — signs session tokens at registration
 // ─────────────────────────────────────────────────────────────────────────────
 
 const SECRET_KEY: string = (() => {
@@ -38,7 +34,6 @@ const SECRET_KEY: string = (() => {
         'Generate one with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"'
       );
     }
-    // Development fallback — warn loudly
     const devKey = randomBytes(32).toString('hex');
     console.warn(
       '[AgentAuth] WARNING: EOS_AGENT_SECRET not set. Using ephemeral key. ' +
@@ -50,25 +45,80 @@ const SECRET_KEY: string = (() => {
 })();
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Revocation persistence — survives process restarts
+// ─────────────────────────────────────────────────────────────────────────────
+
+const REVOCATION_LOG_PATH = resolve(
+  process.env.AGENT_REVOCATION_LOG ?? './agent-revocations.jsonl'
+);
+
+function persistRevocation(agentId: string, revokedBy: string): void {
+  const record = JSON.stringify({ agentId, revokedBy, revokedAt: Date.now() });
+  try {
+    appendFileSync(REVOCATION_LOG_PATH, record + '\n', 'utf8');
+  } catch (err) {
+    console.error('[AgentAuth] Failed to persist revocation:', err);
+  }
+}
+
+function loadPersistentRevocations(): Set<string> {
+  const revoked = new Set<string>();
+  if (!existsSync(REVOCATION_LOG_PATH)) return revoked;
+  try {
+    const lines = readFileSync(REVOCATION_LOG_PATH, 'utf8').split('\n').filter(Boolean);
+    for (const line of lines) {
+      try {
+        const { agentId } = JSON.parse(line) as { agentId: string };
+        if (agentId) revoked.add(agentId);
+      } catch { /* skip malformed lines */ }
+    }
+  } catch { /* ignore read failures — degrade gracefully */ }
+  return revoked;
+}
+
+const persistentlyRevokedAgents: Set<string> = loadPersistentRevocations();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-call nonce cache — prevents replay within TTL window
+// ─────────────────────────────────────────────────────────────────────────────
+
+const NONCE_WINDOW_MS = 5 * 60 * 1000;    // 5 minutes
+const MAX_CLOCK_SKEW_MS = 60 * 1000;       // tolerate 1 minute clock drift
+
+const usedNonces = new Map<string, number>(); // nonce -> expiry timestamp
+
+function purgeExpiredNonces(): void {
+  const now = Date.now();
+  for (const [nonce, expiry] of usedNonces) {
+    if (now > expiry) usedNonces.delete(nonce);
+  }
+}
+
+function consumeNonce(nonce: string): boolean {
+  purgeExpiredNonces();
+  if (usedNonces.has(nonce)) return false;
+  usedNonces.set(nonce, Date.now() + NONCE_WINDOW_MS);
+  return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface AgentToken {
-  /** The raw HMAC token string to present on EventBus calls */
+  /** HMAC session token — proves identity at registration time */
   token: string;
-  /** Agent ID this token belongs to */
+  /**
+   * Per-agent call signing key — used to sign individual EventBus calls.
+   * Never expose this outside the agent. Never log it.
+   */
+  callSigningKey: string;
   agentId: string;
-  /** Risk tier declared at registration */
   tier: AgentRiskTier;
-  /** Channels this agent may publish to */
   allowedPublishChannels: string[];
-  /** Channels this agent may subscribe to (supports wildcards) */
   allowedSubscribeChannels: string[];
-  /** Unix timestamp when this token was issued */
   issuedAt: number;
-  /** Unix timestamp when this token expires (0 = no expiry) */
   expiresAt: number;
-  /** Whether this token has been revoked */
   revoked: boolean;
 }
 
@@ -79,45 +129,59 @@ export interface TokenValidationResult {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Token Registry (in-memory, survives for process lifetime)
+// Token registry (in-memory; revocations are also persisted to disk)
 // ─────────────────────────────────────────────────────────────────────────────
 
 const tokenRegistry = new Map<string, AgentToken>();
 
 // ─────────────────────────────────────────────────────────────────────────────
-// HMAC Helpers
+// Crypto helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-function sign(agentId: string, issuedAt: number): string {
+function signSession(agentId: string, issuedAt: number): string {
   const payload = `${agentId}:${issuedAt}`;
   return createHmac('sha256', SECRET_KEY).update(payload).digest('hex');
 }
 
-function verify(agentId: string, issuedAt: number, token: string): boolean {
-  const expected = sign(agentId, issuedAt);
-  // Constant-time comparison to prevent timing attacks
-  if (expected.length !== token.length) return false;
-  let diff = 0;
-  for (let i = 0; i < expected.length; i++) {
-    diff |= expected.charCodeAt(i) ^ token.charCodeAt(i);
-  }
-  return diff === 0;
+function verifySession(agentId: string, issuedAt: number, token: string): boolean {
+  const expected = signSession(agentId, issuedAt);
+  if (expected.length !== 64 || token.length !== 64) return false;
+  return timingSafeEqual(Buffer.from(expected, 'hex'), Buffer.from(token, 'hex'));
+}
+
+/**
+ * Sign an individual EventBus call. Called by the agent before each publish/subscribe.
+ * The server independently recomputes the signature from its stored callSigningKey.
+ *
+ * @param callSigningKey - The per-agent secret from AgentToken.callSigningKey
+ * @param agentId        - Agent making the call
+ * @param channel        - EventBus channel being accessed
+ * @param nonce          - Fresh random nonce (randomBytes(8).toString('hex'))
+ * @param ts             - Current timestamp in ms (Date.now())
+ */
+export function signCall(
+  callSigningKey: string,
+  agentId: string,
+  channel: string,
+  nonce: string,
+  ts: number,
+): string {
+  const payload = `${agentId}:${channel}:${nonce}:${ts}`;
+  return createHmac('sha256', callSigningKey).update(payload).digest('hex');
+}
+
+function constantTimeHexEqual(a: string, b: string): boolean {
+  if (a.length !== 64 || b.length !== 64) return false;
+  return timingSafeEqual(Buffer.from(a, 'hex'), Buffer.from(b, 'hex'));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Wildcard Channel Matching
+// Wildcard channel matching
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Checks if a channel matches a pattern, supporting wildcards.
- * 'user:*' matches 'user:message', 'user:join', etc.
- * '*' matches everything.
- */
 function channelMatches(pattern: string, channel: string): boolean {
   if (pattern === '*') return true;
   if (!pattern.includes('*')) return pattern === channel;
-
-  // Convert glob pattern to regex
   const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
   return new RegExp(`^${escaped}$`).test(channel);
 }
@@ -127,29 +191,92 @@ function isChannelAllowed(allowedPatterns: string[], channel: string): boolean {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Core validation — shared by canPublish and canSubscribe
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface CallValidationResult {
+  allowed: boolean;
+  stored?: AgentToken;
+  reason?: string;
+}
+
+function validateCall(
+  agentId: string,
+  sig: string,
+  channel: string,
+  nonce: string,
+  ts: number,
+  action: 'publish' | 'subscribe',
+): CallValidationResult {
+  const stored = tokenRegistry.get(agentId);
+
+  if (!stored) {
+    AuditLogger.log({ agentId, event: 'auth.token_rejected', metadata: { reason: 'not_registered', action } });
+    return { allowed: false, reason: 'Agent not registered' };
+  }
+
+  if (stored.revoked) {
+    AuditLogger.log({ agentId, event: 'auth.token_rejected', metadata: { reason: 'revoked', action } });
+    return { allowed: false, reason: 'Token revoked' };
+  }
+
+  if (stored.expiresAt > 0 && Date.now() > stored.expiresAt) {
+    AuditLogger.log({ agentId, event: 'auth.token_rejected', metadata: { reason: 'expired', action } });
+    return { allowed: false, reason: 'Token expired' };
+  }
+
+  // Reject calls with timestamps too far from server clock
+  const skew = Math.abs(Date.now() - ts);
+  if (skew > MAX_CLOCK_SKEW_MS) {
+    AuditLogger.log({ agentId, event: 'auth.token_rejected', metadata: { reason: 'clock_skew', skewMs: skew, action } });
+    return { allowed: false, reason: 'Call timestamp outside acceptable window' };
+  }
+
+  // Verify per-call signature using server-stored callSigningKey (never client-supplied)
+  const expectedSig = signCall(stored.callSigningKey, agentId, channel, nonce, ts);
+  if (!constantTimeHexEqual(sig, expectedSig)) {
+    AuditLogger.log({ agentId, event: 'auth.token_rejected', metadata: { reason: 'invalid_call_signature', action } });
+    return { allowed: false, reason: 'Invalid call signature' };
+  }
+
+  // Deduplicate nonces — exact replay is rejected
+  if (!consumeNonce(nonce)) {
+    AuditLogger.log({ agentId, event: 'security.injection_detected', metadata: { type: 'token_replay', agentId, channel, action } });
+    return { allowed: false, reason: 'Nonce already used (replay attack)' };
+  }
+
+  return { allowed: true, stored };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // AgentAuthManager
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const AgentAuthManager = {
   /**
-   * Issue a new HMAC token for an agent at registration time.
-   * The token encodes the agent's declared channel permissions.
-   *
-   * @param agentId - Unique agent identifier
-   * @param riskConfig - The agent's risk configuration (from AgentRiskConfig)
-   * @param ttlMs - Token time-to-live in ms. 0 = no expiry. Default: 24 hours.
+   * Issue a session token + per-agent call signing key at registration.
+   * Throws if the agent has been persistently revoked.
    */
   issueToken(
     agentId: string,
     riskConfig: AgentRiskConfig,
     ttlMs: number = 24 * 60 * 60 * 1000,
   ): AgentToken {
+    if (persistentlyRevokedAgents.has(agentId)) {
+      throw new Error(
+        `[AgentAuth] Agent "${agentId}" has been persistently revoked and cannot be re-registered. ` +
+        `Clear ${REVOCATION_LOG_PATH} after a security review to re-enable.`
+      );
+    }
+
     const issuedAt = Date.now();
-    const token = sign(agentId, issuedAt);
+    const token = signSession(agentId, issuedAt);
+    const callSigningKey = randomBytes(32).toString('hex');
     const expiresAt = ttlMs > 0 ? issuedAt + ttlMs : 0;
 
     const agentToken: AgentToken = {
       token,
+      callSigningKey,
       agentId,
       tier: riskConfig.tier,
       allowedPublishChannels: riskConfig.allowedPublishChannels,
@@ -176,113 +303,70 @@ export const AgentAuthManager = {
   },
 
   /**
-   * Validates a token string for a given agentId.
-   * Returns the stored token record if valid.
-   */
-  validateToken(agentId: string, tokenStr: string): TokenValidationResult {
-    const stored = tokenRegistry.get(agentId);
-
-    if (!stored) {
-      AuditLogger.log({ agentId, event: 'auth.token_rejected', metadata: { reason: 'not_registered' } });
-      return { valid: false, reason: 'Agent not registered' };
-    }
-
-    if (stored.revoked) {
-      AuditLogger.log({ agentId, event: 'auth.token_rejected', metadata: { reason: 'revoked' } });
-      return { valid: false, reason: 'Token revoked' };
-    }
-
-    if (stored.expiresAt > 0 && Date.now() > stored.expiresAt) {
-      AuditLogger.log({ agentId, event: 'auth.token_rejected', metadata: { reason: 'expired' } });
-      return { valid: false, reason: 'Token expired' };
-    }
-
-    if (!verify(agentId, stored.issuedAt, tokenStr)) {
-      AuditLogger.log({ agentId, event: 'auth.token_rejected', metadata: { reason: 'invalid_signature' } });
-      return { valid: false, reason: 'Invalid token signature' };
-    }
-
-    AuditLogger.log({ agentId, event: 'auth.token_validated' });
-    return { valid: true, token: stored };
-  },
-
-  /**
-   * Checks if an agent (identified by agentId) is allowed to publish to a channel.
-   * The agent's token must be valid AND the channel must be in allowedPublishChannels.
+   * Check whether an agent may publish to a channel.
+   * Validates the per-call HMAC signature and deduplicates the nonce.
    *
    * @param agentId - Agent requesting to publish
-   * @param tokenStr - The agent's HMAC token
+   * @param sig     - Per-call HMAC: signCall(token.callSigningKey, agentId, channel, nonce, ts)
    * @param channel - EventBus channel to publish to
+   * @param nonce   - Fresh random string, e.g. randomBytes(8).toString('hex')
+   * @param ts      - Call timestamp in ms (Date.now())
    */
-  canPublish(agentId: string, tokenStr: string, channel: string): boolean {
-    const validation = this.validateToken(agentId, tokenStr);
+  canPublish(agentId: string, sig: string, channel: string, nonce: string, ts: number): boolean {
+    const result = validateCall(agentId, sig, channel, nonce, ts, 'publish');
 
-    if (!validation.valid || !validation.token) {
+    if (!result.allowed) {
       AuditLogger.log({
         agentId,
         event: 'eventbus.publish_blocked',
-        metadata: { channel, reason: validation.reason ?? 'invalid_token' },
+        metadata: { channel, reason: result.reason },
       });
       return false;
     }
 
-    const allowed = isChannelAllowed(validation.token.allowedPublishChannels, channel);
-
-    if (!allowed) {
+    const channelAllowed = isChannelAllowed(result.stored!.allowedPublishChannels, channel);
+    if (!channelAllowed) {
       AuditLogger.log({
         agentId,
         event: 'agent.permission_denied',
-        metadata: {
-          action: 'publish',
-          channel,
-          allowedChannels: validation.token.allowedPublishChannels,
-        },
+        metadata: { action: 'publish', channel, allowedChannels: result.stored!.allowedPublishChannels },
       });
     }
-
-    return allowed;
+    return channelAllowed;
   },
 
   /**
-   * Checks if an agent is allowed to subscribe to a channel.
-   *
-   * @param agentId - Agent requesting to subscribe
-   * @param tokenStr - The agent's HMAC token
-   * @param channel - EventBus channel to subscribe to
+   * Check whether an agent may subscribe to a channel.
+   * Same signature verification as canPublish.
    */
-  canSubscribe(agentId: string, tokenStr: string, channel: string): boolean {
-    const validation = this.validateToken(agentId, tokenStr);
+  canSubscribe(agentId: string, sig: string, channel: string, nonce: string, ts: number): boolean {
+    const result = validateCall(agentId, sig, channel, nonce, ts, 'subscribe');
 
-    if (!validation.valid || !validation.token) {
-      return false;
-    }
+    if (!result.allowed) return false;
 
-    const allowed = isChannelAllowed(validation.token.allowedSubscribeChannels, channel);
-
-    if (!allowed) {
+    const channelAllowed = isChannelAllowed(result.stored!.allowedSubscribeChannels, channel);
+    if (!channelAllowed) {
       AuditLogger.log({
         agentId,
         event: 'agent.permission_denied',
-        metadata: {
-          action: 'subscribe',
-          channel,
-          allowedChannels: validation.token.allowedSubscribeChannels,
-        },
+        metadata: { action: 'subscribe', channel, allowedChannels: result.stored!.allowedSubscribeChannels },
       });
     }
-
-    return allowed;
+    return channelAllowed;
   },
 
   /**
-   * Revoke an agent's token immediately.
-   * All subsequent EventBus operations from this agent will be blocked.
+   * Revoke a token immediately. Persists the revocation to disk so it
+   * survives restarts — the agent cannot re-register after revocation.
    */
   revokeToken(agentId: string, revokedBy: string = 'system'): boolean {
     const stored = tokenRegistry.get(agentId);
     if (!stored) return false;
 
     stored.revoked = true;
+    persistentlyRevokedAgents.add(agentId);
+    persistRevocation(agentId, revokedBy);
+
     AuditLogger.log({
       agentId,
       event: 'auth.token_revoked',
@@ -293,23 +377,41 @@ export const AgentAuthManager = {
   },
 
   /**
-   * Revoke all tokens and re-issue them.
-   * Use after a security incident or credential rotation.
-   *
-   * @param riskConfigs - Map of agentId to riskConfig for re-issuance
+   * Validate the session-level token (identity check only, not a call credential).
+   * Use canPublish/canSubscribe for per-call authorization.
    */
+  validateToken(agentId: string, tokenStr: string): TokenValidationResult {
+    const stored = tokenRegistry.get(agentId);
+
+    if (!stored) {
+      return { valid: false, reason: 'Agent not registered' };
+    }
+    if (stored.revoked) {
+      return { valid: false, reason: 'Token revoked' };
+    }
+    if (stored.expiresAt > 0 && Date.now() > stored.expiresAt) {
+      return { valid: false, reason: 'Token expired' };
+    }
+    if (!verifySession(agentId, stored.issuedAt, tokenStr)) {
+      return { valid: false, reason: 'Invalid token signature' };
+    }
+
+    return { valid: true, token: stored };
+  },
+
+  /** Revoke all tokens and re-issue (use after key compromise) */
   rotateAll(riskConfigs: Map<string, AgentRiskConfig>): void {
     for (const [agentId, config] of riskConfigs) {
-      this.revokeToken(agentId, 'key_rotation');
+      const stored = tokenRegistry.get(agentId);
+      if (stored) stored.revoked = true;
       this.issueToken(agentId, config);
     }
   },
 
-  /**
-   * List all registered tokens and their status.
-   * For admin/audit use only.
-   */
-  listTokens(): Array<Omit<AgentToken, 'token'>> {
-    return Array.from(tokenRegistry.values()).map(({ token: _, ...rest }) => rest);
+  /** List token metadata for admin/audit use. Never includes secrets. */
+  listTokens(): Array<Omit<AgentToken, 'token' | 'callSigningKey'>> {
+    return Array.from(tokenRegistry.values()).map(
+      ({ token: _t, callSigningKey: _k, ...rest }) => rest
+    );
   },
 };
