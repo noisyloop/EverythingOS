@@ -69,7 +69,7 @@ export interface HealthThresholds {
   diskCritical: number;
 }
 
-export type HealthStatus = 'healthy' | 'degraded' | 'unhealthy' | 'critical';
+export type SystemHealthStatus = 'healthy' | 'degraded' | 'unhealthy' | 'critical';
 
 export class HealthMonitorAgent extends Agent {
   private thresholds: HealthThresholds;
@@ -217,7 +217,7 @@ export class HealthMonitorAgent extends Agent {
     return { total: agents.length, running, stopped, error, unhealthy };
   }
 
-  private determineStatus(health: SystemHealth): HealthStatus {
+  private determineStatus(health: SystemHealth): SystemHealthStatus {
     if (health.cpu.usage >= this.thresholds.cpuCritical) return 'critical';
     if (health.memory.usagePercent >= this.thresholds.memoryCritical) return 'critical';
     if (health.disk.usagePercent >= this.thresholds.diskCritical) return 'critical';
@@ -228,7 +228,7 @@ export class HealthMonitorAgent extends Agent {
     return 'healthy';
   }
 
-  private checkAndEmitAlerts(health: SystemHealth, status: HealthStatus): void {
+  private checkAndEmitAlerts(health: SystemHealth, status: SystemHealthStatus): void {
     if (status === 'critical') {
       this.emit('health:alert', {
         level: 'critical', status, health,
@@ -265,7 +265,7 @@ export class HealthMonitorAgent extends Agent {
   getLastHealth(): SystemHealth | undefined { return this.lastHealth; }
   getHealthHistory(): SystemHealth[] { return [...this.healthHistory]; }
 
-  getHealthStatus(): HealthStatus {
+  getHealthStatus(): SystemHealthStatus {
     if (!this.lastHealth) return 'healthy';
     return this.determineStatus(this.lastHealth);
   }

@@ -26,6 +26,10 @@ export * from './runtime/IntentContract';
 // Config
 export * from './config/system';
 
+// Types
+export * from './types/agent-manifest';
+export * from './types/agent-risk';
+
 // Services
 export * from './services';
 
