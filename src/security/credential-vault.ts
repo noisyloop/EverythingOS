@@ -137,6 +137,10 @@ export interface RotationRecord {
 const activeCredentials = new Map<string, ScopedCredential>();
 const useLog: CredentialUseRecord[] = [];
 const rotationLog: RotationRecord[] = [];
+const USE_LOG_LIMIT = 10_000;
+
+// Locked after startup — no runtime provider registration once set
+let providerRegistryLocked = false;
 
 const DEFAULT_TTL_MS = 5 * 60 * 1000;   // 5 minutes
 const MAX_TTL_MS = 60 * 60 * 1000;      // 1 hour hard ceiling
@@ -271,7 +275,7 @@ export const CredentialVault = {
 
     const headers = formatter(keys);
 
-    // Log the use — this is the provenance record
+    // Log the use — this is the provenance record (ring buffer capped at USE_LOG_LIMIT)
     const useRecord: CredentialUseRecord = {
       credentialId,
       agentId: cred.agentId,
@@ -279,6 +283,7 @@ export const CredentialVault = {
       taskId: cred.taskId,
       usedAt: Date.now(),
     };
+    if (useLog.length >= USE_LOG_LIMIT) useLog.shift();
     useLog.push(useRecord);
 
     AuditLogger.log({
@@ -394,6 +399,7 @@ export const CredentialVault = {
 
   /**
    * Register a custom provider not in the built-in list.
+   * Must be called at startup before lockProviders() — throws after locking.
    *
    * @param providerId - Unique identifier for the provider
    * @param envVarNames - Env var names holding the credentials
@@ -404,8 +410,21 @@ export const CredentialVault = {
     envVarNames: string[],
     headerFormatter: (keys: string[]) => Record<string, string>,
   ): void {
+    if (providerRegistryLocked) {
+      throw new Error(
+        `[CredentialVault] Provider registry is locked. registerProvider() must be called at startup, before lockProviders().`
+      );
+    }
     PROVIDER_ENV_KEYS[providerId] = envVarNames;
     PROVIDER_HEADER_FORMATS[providerId] = headerFormatter;
+  },
+
+  /**
+   * Lock the provider registry. Call once at startup after all providers are registered.
+   * Prevents runtime registration of exfiltrating header formatters.
+   */
+  lockProviders(): void {
+    providerRegistryLocked = true;
   },
 
   /**

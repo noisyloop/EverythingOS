@@ -1,14 +1,73 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // EVERYTHINGOS - Approval Gate Agent
 // Human-in-the-loop for sensitive decisions
+//
+// Security model: approval decisions arrive via HMAC-signed submitDecision()
+// calls, NOT via the EventBus. Any agent can emit EventBus events — removing
+// approval:decision from the bus prevents a compromised agent from self-approving
+// its own HIGH-tier actions (STRIDE finding E-1/S-2).
 // ═══════════════════════════════════════════════════════════════════════════════
 
+import { createHmac, randomBytes, timingSafeEqual } from 'crypto';
 import { Agent, AgentConfig } from '../../runtime/Agent';
 import { AgentRiskTier } from '../../types/agent-risk';
-import { eventBus } from '../../core/event-bus/EventBus';
 import { toolRegistry } from '../../services/tools';
 import { intentManager, Intent } from '../../runtime/IntentContract';
 import { ToolApprovalRequest } from '../../services/tools/ToolTypes';
+import { AuditLogger } from '../../security/audit-log';
+import { createHttpClient } from '../../security/http-guard';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Approval HMAC secret — separate from EOS_AGENT_SECRET
+// ─────────────────────────────────────────────────────────────────────────────
+
+const APPROVAL_GATE_SECRET: string = (() => {
+  const key = process.env.APPROVAL_GATE_SECRET;
+  if (!key) {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error(
+        '[ApprovalGate] APPROVAL_GATE_SECRET is required in production. ' +
+        'Generate: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"'
+      );
+    }
+    const dev = randomBytes(32).toString('hex');
+    console.warn('[ApprovalGate] WARNING: APPROVAL_GATE_SECRET not set. Using ephemeral key. Set in .env for stability.');
+    return dev;
+  }
+  return key;
+})();
+
+// Token format: <hmac>:<minuteTimestamp>
+// HMAC = HMAC-SHA256("${approvalId}:${approved}:${approvedBy}:${minuteTs}", APPROVAL_GATE_SECRET)
+// Tokens are valid for ±5 minutes from generation time.
+
+function generateApprovalToken(approvalId: string, approved: boolean, approvedBy: string): string {
+  const minuteTs = Math.floor(Date.now() / 60_000);
+  const payload = `${approvalId}:${approved ? '1' : '0'}:${approvedBy}:${minuteTs}`;
+  const hmac = createHmac('sha256', APPROVAL_GATE_SECRET).update(payload).digest('hex');
+  return `${hmac}:${minuteTs}`;
+}
+
+function verifyApprovalToken(approvalId: string, approved: boolean, approvedBy: string, token: string): boolean {
+  const colonIdx = token.lastIndexOf(':');
+  if (colonIdx === -1) return false;
+  const hmac = token.slice(0, colonIdx);
+  const minuteTsStr = token.slice(colonIdx + 1);
+  const minuteTs = parseInt(minuteTsStr, 10);
+  if (isNaN(minuteTs) || hmac.length !== 64) return false;
+
+  const currentMinute = Math.floor(Date.now() / 60_000);
+  if (Math.abs(currentMinute - minuteTs) > 5) return false;
+
+  const payload = `${approvalId}:${approved ? '1' : '0'}:${approvedBy}:${minuteTs}`;
+  const expected = createHmac('sha256', APPROVAL_GATE_SECRET).update(payload).digest('hex');
+  if (expected.length !== 64) return false;
+  return timingSafeEqual(Buffer.from(hmac, 'hex'), Buffer.from(expected, 'hex'));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Types
+// ─────────────────────────────────────────────────────────────────────────────
 
 export type ApprovalChannel = 'cli' | 'webhook' | 'discord' | 'slack' | 'email';
 
@@ -44,10 +103,15 @@ export interface ApprovalGateConfig {
   };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ApprovalGateAgent
+// ─────────────────────────────────────────────────────────────────────────────
+
 export class ApprovalGateAgent extends Agent {
   private pending: Map<string, PendingApproval> = new Map();
   private history: ApprovalDecision[] = [];
   private gateConfig: ApprovalGateConfig;
+  private readonly webhookClient = createHttpClient({ agentId: 'approval-gate:webhook' });
 
   constructor(config?: Partial<ApprovalGateConfig>) {
     const agentConfig: AgentConfig = {
@@ -63,8 +127,10 @@ export class ApprovalGateAgent extends Agent {
           'approval:pending', 'approval:approved', 'approval:denied',
           'discord:send_message', 'slack:send_message', 'email:send',
         ],
+        // approval:decision intentionally absent — decisions arrive via submitDecision(),
+        // not the EventBus, to prevent any agent from self-approving its own actions.
         allowedSubscribeChannels: [
-          'tools:approval:request', 'intent:approval:required', 'approval:decision',
+          'tools:approval:request', 'intent:approval:required',
         ],
       },
     };
@@ -91,10 +157,6 @@ export class ApprovalGateAgent extends Agent {
       this.handleIntentApproval((event.payload as { intent: Intent }).intent);
     });
 
-    this.subscribe('approval:decision', (event) => {
-      this.processDecision(event.payload as ApprovalDecision);
-    });
-
     this.log('info', `Approval Gate started with channels: ${this.gateConfig.channels.join(', ')}`);
   }
 
@@ -114,6 +176,61 @@ export class ApprovalGateAgent extends Agent {
       }
     }
   }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Authenticated approval intake — replaces EventBus approval:decision channel
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Submit an approval decision with an HMAC-signed token.
+   *
+   * Generate the token with ApprovalGateAgent.generateToken() or:
+   *   node -e "
+   *     const { createHmac } = require('crypto');
+   *     const secret = process.env.APPROVAL_GATE_SECRET;
+   *     const minuteTs = Math.floor(Date.now() / 60000);
+   *     const payload = \`{approvalId}:{1|0}:{approvedBy}:\${minuteTs}\`;
+   *     console.log(createHmac('sha256', secret).update(payload).digest('hex') + ':' + minuteTs);
+   *   "
+   *
+   * Tokens are valid for ±5 minutes from generation time.
+   */
+  submitDecision(approvalId: string, approved: boolean, approvedBy: string, token: string): boolean {
+    if (!verifyApprovalToken(approvalId, approved, approvedBy, token)) {
+      this.log('warn', `Approval decision rejected — invalid HMAC token for ${approvalId}`);
+      AuditLogger.log({
+        agentId: this.id,
+        event: 'auth.token_rejected',
+        metadata: { reason: 'invalid_approval_token', approvalId, approvedBy },
+      });
+      return false;
+    }
+
+    const pending = this.pending.get(approvalId);
+    if (!pending) {
+      this.log('warn', `No pending approval found for ${approvalId}`);
+      return false;
+    }
+
+    if (approved) {
+      this.approve(approvalId, approvedBy);
+    } else {
+      this.deny(approvalId, approvedBy, 'Denied by approver');
+    }
+    return true;
+  }
+
+  /**
+   * Generate an HMAC token for use with submitDecision().
+   * Call this from a trusted context (CLI tool, webhook receiver) — not from agent code.
+   */
+  static generateToken(approvalId: string, approved: boolean, approvedBy: string): string {
+    return generateApprovalToken(approvalId, approved, approvedBy);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Internal handlers
+  // ─────────────────────────────────────────────────────────────────────────────
 
   private handleToolApproval(request: ToolApprovalRequest): void {
     const risk = this.assessToolRisk(request);
@@ -225,18 +342,28 @@ export class ApprovalGateAgent extends Agent {
   }
 
   private formatApprovalMessage(pending: PendingApproval): string {
-    const riskEmoji = { low: '🟢', medium: '🟡', high: '🟠', critical: '🔴' };
+    const riskLabel = { low: 'LOW', medium: 'MEDIUM', high: 'HIGH', critical: 'CRITICAL' };
+    const approveToken = generateApprovalToken(pending.id, true, 'approver');
+    const denyToken = generateApprovalToken(pending.id, false, 'approver');
     return [
-      `${riskEmoji[pending.risk]} APPROVAL REQUIRED [${pending.risk.toUpperCase()}]`,
-      ``, `ID: ${pending.id}`, `Type: ${pending.type}`, ``,
-      pending.summary, ``,
-      `Expires: ${new Date(pending.expiresAt).toISOString()}`, ``,
-      `To approve: POST /api/approvals/${pending.id}/approve`,
-      `To deny: POST /api/approvals/${pending.id}/deny`,
+      `APPROVAL REQUIRED [${riskLabel[pending.risk]}]`,
+      ``,
+      `ID: ${pending.id}`,
+      `Type: ${pending.type}`,
+      ``,
+      pending.summary,
+      ``,
+      `Expires: ${new Date(pending.expiresAt).toISOString()}`,
+      ``,
+      `To approve or deny, call submitDecision() with a signed token:`,
+      `  approvalGate.submitDecision("${pending.id}", true, "approver", "${approveToken}")`,
+      `  approvalGate.submitDecision("${pending.id}", false, "approver", "${denyToken}")`,
+      ``,
+      `Tokens expire in ~5 minutes. Regenerate with ApprovalGateAgent.generateToken().`,
     ].join('\n');
   }
 
-  private notifyCLI(pending: PendingApproval, message: string): void {
+  private notifyCLI(_pending: PendingApproval, message: string): void {
     console.log('\n' + '═'.repeat(60));
     console.log(message);
     console.log('═'.repeat(60) + '\n');
@@ -244,10 +371,11 @@ export class ApprovalGateAgent extends Agent {
 
   private async notifyWebhook(pending: PendingApproval, message: string): Promise<void> {
     if (!this.gateConfig.webhookUrl) return;
-    await fetch(this.gateConfig.webhookUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type: 'approval_required', approval: pending, message }),
+    // Uses http-guard client — blocks internal URLs to prevent SSRF
+    await this.webhookClient.post(this.gateConfig.webhookUrl, {
+      type: 'approval_required',
+      approval: { id: pending.id, type: pending.type, risk: pending.risk, summary: pending.summary, expiresAt: pending.expiresAt },
+      message,
     });
   }
 
@@ -290,19 +418,6 @@ export class ApprovalGateAgent extends Agent {
       `Reasoning: ${intent.reasoning}`,
       `Payload: ${JSON.stringify(intent.payload, null, 2)}`,
     ].join('\n');
-  }
-
-  private processDecision(decision: ApprovalDecision): void {
-    const pending = this.pending.get(decision.approvalId);
-    if (!pending) {
-      this.log('warn', `No pending approval found for ${decision.approvalId}`);
-      return;
-    }
-    if (decision.approved) {
-      this.approve(decision.approvalId, decision.approvedBy, decision.reason);
-    } else {
-      this.deny(decision.approvalId, decision.approvedBy, decision.reason ?? 'Denied by user');
-    }
   }
 
   approve(approvalId: string, approvedBy: string, reason?: string): boolean {

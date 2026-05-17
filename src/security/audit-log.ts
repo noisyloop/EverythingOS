@@ -270,6 +270,7 @@ export const AuditLogger = {
 
   /**
    * Resume the hash chain from the last persisted entry.
+   * Verifies chain integrity at startup — logs CRITICAL alert if tampered.
    * Call once at startup before any agents start.
    */
   initialize(): void {
@@ -287,6 +288,17 @@ export const AuditLogger = {
       lastHash = 'GENESIS';
       sequenceCounter = 0;
       return;
+    }
+
+    // Verify the full chain before resuming — detect truncation or replacement
+    const verifyResult = AuditLogger.verifyChain(LOG_FILE_PATH);
+    if (!verifyResult.valid) {
+      console.error(
+        `[AuditLogger] CRITICAL: Audit log chain integrity check FAILED. ` +
+        `Reason: ${verifyResult.reason}. The log may have been tampered with. ` +
+        `Review ${LOG_FILE_PATH} before proceeding.`
+      );
+      // Still resume from last parseable entry — do not silently truncate history
     }
 
     try {

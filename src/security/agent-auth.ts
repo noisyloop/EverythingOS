@@ -15,11 +15,15 @@
  *      A quarantined agent cannot re-register after a crash.
  */
 
-import { createHmac, randomBytes, timingSafeEqual } from 'crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'crypto';
 import { appendFileSync, existsSync, readFileSync } from 'fs';
 import { resolve } from 'path';
 import { AuditLogger } from './audit-log';
 import { AgentRiskConfig, AgentRiskTier } from '../types/agent-risk';
+
+function sha256(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Master secret — signs session tokens at registration
@@ -52,10 +56,24 @@ const REVOCATION_LOG_PATH = resolve(
   process.env.AGENT_REVOCATION_LOG ?? './agent-revocations.jsonl'
 );
 
+// Hash chain state for the revocation log
+let lastRevocationHash = 'GENESIS';
+
+interface RevocationRecord {
+  agentId: string;
+  revokedBy: string;
+  revokedAt: number;
+  previousHash: string;
+  entryHash: string;
+}
+
 function persistRevocation(agentId: string, revokedBy: string): void {
-  const record = JSON.stringify({ agentId, revokedBy, revokedAt: Date.now() });
+  const partial = { agentId, revokedBy, revokedAt: Date.now(), previousHash: lastRevocationHash };
+  const entryHash = sha256(JSON.stringify(partial));
+  const record = JSON.stringify({ ...partial, entryHash });
   try {
     appendFileSync(REVOCATION_LOG_PATH, record + '\n', 'utf8');
+    lastRevocationHash = entryHash;
   } catch (err) {
     console.error('[AgentAuth] Failed to persist revocation:', err);
   }
@@ -64,15 +82,78 @@ function persistRevocation(agentId: string, revokedBy: string): void {
 function loadPersistentRevocations(): Set<string> {
   const revoked = new Set<string>();
   if (!existsSync(REVOCATION_LOG_PATH)) return revoked;
+
+  let lines: string[];
   try {
-    const lines = readFileSync(REVOCATION_LOG_PATH, 'utf8').split('\n').filter(Boolean);
-    for (const line of lines) {
-      try {
-        const { agentId } = JSON.parse(line) as { agentId: string };
-        if (agentId) revoked.add(agentId);
-      } catch { /* skip malformed lines */ }
+    lines = readFileSync(REVOCATION_LOG_PATH, 'utf8').split('\n').filter(Boolean);
+  } catch {
+    console.error('[AgentAuth] CRITICAL: Failed to read revocation log. All revocations may be lost.');
+    return revoked;
+  }
+
+  let chainHash = 'GENESIS';
+  let legacyEntries = 0;
+  let chainBroken = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    let entry: Partial<RevocationRecord>;
+    try {
+      entry = JSON.parse(lines[i]) as Partial<RevocationRecord>;
+    } catch {
+      // Parse failure — treat as critical security event and skip
+      console.error(`[AgentAuth] CRITICAL: Revocation log line ${i + 1} failed to parse. File may be tampered.`);
+      AuditLogger.log({
+        agentId: 'agent-auth',
+        event: 'security.injection_detected',
+        metadata: { type: 'revocation_log_parse_error', line: i + 1 },
+      });
+      continue;
     }
-  } catch { /* ignore read failures — degrade gracefully */ }
+
+    if (!entry.agentId) continue;
+
+    if (entry.entryHash && entry.previousHash !== undefined) {
+      // New chain-verified format
+      if (!chainBroken) {
+        if (entry.previousHash !== chainHash) {
+          chainBroken = true;
+          console.error(`[AgentAuth] CRITICAL: Revocation log chain broken at line ${i + 1}. File may have been tampered.`);
+          AuditLogger.log({
+            agentId: 'agent-auth',
+            event: 'security.injection_detected',
+            metadata: { type: 'revocation_chain_broken', line: i + 1, agentId: entry.agentId },
+          });
+        } else {
+          const { entryHash, ...rest } = entry as RevocationRecord;
+          const expected = sha256(JSON.stringify(rest));
+          if (expected !== entryHash) {
+            chainBroken = true;
+            console.error(`[AgentAuth] CRITICAL: Revocation entry hash mismatch at line ${i + 1} for agent ${entry.agentId}.`);
+            AuditLogger.log({
+              agentId: 'agent-auth',
+              event: 'security.injection_detected',
+              metadata: { type: 'revocation_entry_tampered', line: i + 1, agentId: entry.agentId },
+            });
+          } else {
+            chainHash = entryHash;
+          }
+        }
+      }
+    } else {
+      legacyEntries++;
+    }
+
+    revoked.add(entry.agentId);
+  }
+
+  if (legacyEntries > 0) {
+    console.warn(`[AgentAuth] WARNING: ${legacyEntries} legacy revocation entries without hash chain. Run a migration to upgrade.`);
+  }
+  if (chainBroken) {
+    console.error('[AgentAuth] CRITICAL: Revocation log integrity check failed. Review agent-revocations.jsonl before proceeding.');
+  }
+
+  lastRevocationHash = chainHash;
   return revoked;
 }
 
@@ -415,3 +496,12 @@ export const AgentAuthManager = {
     );
   },
 };
+
+// Purge expired tokens and stale nonces every 5 minutes to prevent unbounded memory growth
+setInterval(() => {
+  const now = Date.now();
+  for (const [agentId, token] of tokenRegistry) {
+    if (token.expiresAt > 0 && now > token.expiresAt) tokenRegistry.delete(agentId);
+  }
+  purgeExpiredNonces();
+}, 5 * 60 * 1000).unref();

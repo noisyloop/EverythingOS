@@ -166,6 +166,14 @@ export class SupervisorAgent {
     return this.policyEngine.removePolicy(policyId);
   }
 
+  /**
+   * Lock the policy store after startup. Prevents runtime policy injection
+   * by compromised in-process agents. Call once all startup policies are loaded.
+   */
+  lockPolicies(): void {
+    this.policyEngine.lock();
+  }
+
   async evaluateAction(agentId: string, action: string, context: Record<string, unknown>): Promise<PolicyDecision> {
     return this.policyEngine.evaluate(agentId, action, context);
   }
