@@ -80,6 +80,15 @@ export interface ThinkOptions {
   _unsafeSkipSanitization?: never;
 }
 
+export interface HealthStatus {
+  id: string;
+  name: string;
+  status: 'healthy' | 'degraded' | 'unhealthy' | 'idle';
+  uptime?: number;
+  lastChecked: string;
+  details?: Record<string, unknown>;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Abstract Base Agent
 // ─────────────────────────────────────────────────────────────────────────────
@@ -98,6 +107,7 @@ export abstract class Agent {
   private _subscriptions: Array<() => void> = [];
   private _running = false;
   private _status: AgentStatus = 'idle';
+  private _startedAt: number | null = null;
 
   constructor(protected readonly config: AgentConfig) {
     // Use provided riskConfig or fall back to foundation default
@@ -147,6 +157,7 @@ export abstract class Agent {
 
     this._token = AgentAuthManager.issueToken(this.id, this.config.riskConfig!);
     this._status = 'running';
+    this._startedAt = Date.now();
 
     AuditLogger.log({ agentId: this.id, event: 'agent.started', metadata: { tier: this.risk.tier, type: this.type } });
 
@@ -366,6 +377,58 @@ export abstract class Agent {
 
     const unsub = eventBus.on(type, handler as (event: { type: string; payload: unknown }) => void);
     this._subscriptions.push(unsub);
+  }
+
+  /**
+   * act() — emit an event and record it to the DecisionLedger in one call.
+   * Use instead of emit() whenever the action has real-world consequences
+   * (HIGH-tier agents always; MEDIUM-tier agents for consequential publishes).
+   */
+  protected act(
+    channel: string,
+    payload: unknown,
+    options?: {
+      priority?: 'critical' | 'high' | 'normal' | 'low';
+      reason?: string;
+    },
+  ): void {
+    this.emit(channel, payload, { priority: options?.priority });
+
+    const inputHash = hashContent(JSON.stringify(payload));
+    const ledgerContext = DecisionLedger.buildContext({
+      modelId: 'agent.act',
+      promptTemplate: options?.reason ?? channel,
+      parameters: { channel, tier: this.risk.tier },
+    });
+
+    DecisionLedger.record({
+      agentId: this.id,
+      decisionType: 'agent.action' as Parameters<typeof DecisionLedger.record>[0]['decisionType'],
+      context: ledgerContext,
+      inputHash,
+      outputHash: inputHash,
+      outcome: { channel, reason: options?.reason },
+    });
+  }
+
+  /**
+   * healthCheck() — returns this agent's current health for the orchestrator.
+   * Override to add domain-specific health signals (queue depth, last error, etc.).
+   */
+  healthCheck(): HealthStatus {
+    const status = this._running
+      ? 'healthy'
+      : this._status === 'error'
+        ? 'unhealthy'
+        : 'idle';
+
+    return {
+      id: this.id,
+      name: this.name,
+      status,
+      uptime: this._startedAt ? Date.now() - this._startedAt : undefined,
+      lastChecked: new Date().toISOString(),
+    };
   }
 
   // ─────────────────────────────────────────────────────────────────────────
