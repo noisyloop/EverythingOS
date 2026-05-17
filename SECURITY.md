@@ -22,7 +22,7 @@ known risks, responsible use, and the security controls built into the framework
 **Do not open a public GitHub issue for security vulnerabilities.**
 
 Report vulnerabilities privately via GitHub's Security Advisory system:
-1. Go to https://github.com/m0rs3c0d3/EverythingOS/security/advisories
+1. Go to https://github.com/noisyloop/EverythingOS/security/advisories
 2. Click "New draft security advisory"
 3. Provide a detailed description, reproduction steps, and impact assessment
 
