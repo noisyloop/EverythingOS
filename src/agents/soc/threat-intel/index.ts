@@ -78,7 +78,7 @@ export default class ThreatIntelAgent extends Agent {
           dataPrivacyRisk: false,
         },
         allowedPublishChannels: ['intel:ioc:match', 'intel:ioc:added', 'intel:feed:updated', 'intel:stats'],
-        allowedSubscribeChannels: ['intel:correlate', 'intel:feed:add', 'intel:ioc:add'],
+        allowedSubscribeChannels: ['intel:correlate', 'intel:feed:add', 'intel:ioc:add', 'intel:ioc:bundle'],
         auditInputs: true,
         auditOutputs: true,
       },
@@ -99,6 +99,36 @@ export default class ThreatIntelAgent extends Agent {
 
     this.subscribe<IOC>('intel:ioc:add', (event) => {
       this.addIOC(event.payload);
+    });
+
+    // Receives verified IOC bundles from GlasswallyAgent — pre-HMAC-verified,
+    // batched to avoid per-IOC EventBus rate limits on large cluster bundles
+    this.subscribe<{
+      cluster_id: string;
+      ips: string[];
+      subnets: string[];
+      tls_fingerprints: string[];
+      confidence: number;
+      source: string;
+      timestamp: string;
+    }>('intel:ioc:bundle', (event) => {
+      const { ips, subnets, tls_fingerprints, confidence, source } = event.payload;
+      let added = 0;
+      for (const ip of ips) {
+        this.addIOC({ value: ip, type: 'ip', confidence, source, addedAt: Date.now() });
+        added++;
+      }
+      for (const subnet of subnets) {
+        this.addIOC({ value: subnet, type: 'ip', confidence, source, addedAt: Date.now() });
+        added++;
+      }
+      for (const fp of tls_fingerprints) {
+        this.addIOC({ value: fp, type: 'hash', confidence, source, addedAt: Date.now() });
+        added++;
+      }
+      if (added > 0) {
+        this.log('info', `IOC bundle ingested from ${source}: +${added} IOCs`);
+      }
     });
 
     await this.refreshFeeds();

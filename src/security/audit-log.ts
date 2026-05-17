@@ -48,7 +48,9 @@ export type AuditEventType =
   | 'agent.permission_denied'
   | 'safety.violation'
   | 'safety.emergency_stop'
-  | 'incident.detected';
+  | 'incident.detected'
+  | 'security.glasswally_rate_limited'
+  | 'security.ioc_bundle_tampered';
 
 export interface AuditEntry {
   seq: number;

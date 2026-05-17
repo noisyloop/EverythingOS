@@ -1,9 +1,6 @@
 // ═══════════════════════════════════════════════════════════════════════════════
-// EVERYTHINGOS - Agents Module
+// EVERYTHINGOS - Security Agents
 // ═══════════════════════════════════════════════════════════════════════════════
 
-export * from './foundation';
-export * from './decision';
-export * from './creative';
-export * from './soc';
-export * from './security';
+export { default as GlasswallyAgent, MANIFEST as GLASSWALLY_MANIFEST } from './glasswally/index';
+export type { GlasswallyAgentOptions } from './glasswally/index';
