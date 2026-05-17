@@ -185,6 +185,27 @@ The new `PluginSandbox` class runs plugins in `worker_threads` with:
 
 ---
 
+### Glasswally Integration — Kernel-Level Distillation Attack Detection
+
+EverythingOS integrates with [Glasswally](https://github.com/noisyloop/glasswally), a companion tool that detects model distillation attacks at the kernel level using Linux eBPF uprobes. Glasswally monitors 16 weighted behavioral signals — TLS fingerprints, query velocity, semantic clustering, payment graph pivoting, HTTP/2 settings, and more — to identify coordinated campaigns that extract model capabilities through high-volume querying.
+
+`GlasswallyAgent` bridges the two systems: it tails Glasswally's `enforcement_actions.jsonl` output, sanitizes all free-text fields through the injection detection pipeline, and routes each enforcement decision into the EverythingOS SOC stack as a pre-classified `alert:raw` event.
+
+| Glasswally action | Composite score | EverythingOS severity | SOC response |
+|---|---|---|---|
+| `SuspendAccount` / `ClusterTakedown` | ≥ 0.85 | CRITICAL | `alert:critical` → immediate response |
+| `InjectCanary` | ≥ 0.72 | HIGH | `alert:high` → analyst review |
+| `RateLimit` | ≥ 0.52 | MEDIUM | `alert:medium` → monitoring |
+| `FlagForReview` | ≥ 0.35 | LOW | `alert:low` → queue |
+
+**IOC bundles** — when Glasswally issues a `ClusterTakedown`, it emits a signed IOC bundle containing IP addresses, subnet ranges, and TLS fingerprints for the attacker cluster. `GlasswallyAgent` verifies the bundle's HMAC-SHA256 signature before forwarding it to `ThreatIntelAgent`. A bundle whose signature does not verify is discarded and logged as a security event — a tampered bundle is treated as an attack, not a data error.
+
+**Trust boundary** — all `reason` and `evidence` fields arriving from Glasswally pass through the full Unicode-normalized injection detection pipeline before touching the EventBus. Adversarial content in model output that Glasswally captured cannot propagate into EverythingOS prompts.
+
+**File:** `src/agents/security/glasswally/index.ts`
+
+---
+
 ### Risk Tier System
 
 Every agent declares a risk tier at registration. The framework enforces tier-appropriate controls automatically:
@@ -218,6 +239,7 @@ EverythingOS maps explicitly to NIST AI RMF 1.0 and NIST AI 600-1. Full control 
 
 These are real gaps. If you have ideas, open a discussion or a PR.
 
+- **Glasswally requires a separate privileged process** — `GlasswallyAgent` tails Glasswally's output files; Glasswally itself requires `CAP_BPF` and Linux 5.8+ to run in eBPF mode. It is a separate process and is not embedded in the EverythingOS runtime. In `tail` mode (no eBPF), Glasswally works on any platform but loses kernel-level visibility.
 - **Swarm mesh has no mTLS** — SwarmCoordinator communicates over a mesh network without mutual TLS. A node on the same network segment could inject as a peer. Fixing this requires a per-deployment CA and certificate distribution mechanism.
 - **Credential vault uses environment variables** — API keys live in `process.env`, readable by any in-process code (including plugins, before the sandbox was added). A proper fix requires an external secrets manager (HashiCorp Vault, AWS Secrets Manager) or an HSM.
 - **Fingerprint probes are static and known** — The behavioral fingerprinting probes are in the source code. An adversary who can read this repo can craft a model that passes them. Probe randomization or out-of-band probe sets would help.
@@ -252,6 +274,8 @@ npm run dev     # start with hot reload
 | `AUDIT_LOG_PATH` | No | Path for the audit JSONL. Default: `./everythingos-audit.jsonl` |
 | `AGENT_REVOCATION_LOG` | No | Path for persistent revocations. Default: `./agent-revocations.jsonl` |
 | `MODEL_GUARD_DIR` | No | Directory for fingerprints and violations. Default: `./model-guard/` |
+| `GLASSWALLY_OUTPUT_DIR` | If using Glasswally | Absolute path to Glasswally's `--output` directory. Required when running `GlasswallyAgent`. |
+| `GLASSWALLY_IOC_SECRET` | If using Glasswally | HMAC-SHA256 secret for IOC bundle verification. Must match the secret configured in Glasswally. Without this, IOC bundles are logged but not forwarded to `ThreatIntelAgent`. |
 
 ---
 
