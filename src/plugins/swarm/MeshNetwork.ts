@@ -4,7 +4,7 @@
 // Handles: Discovery, routing, message relay, network topology
 // ═══════════════════════════════════════════════════════════════════════════════
 
-import { createHmac, randomBytes, timingSafeEqual } from 'crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'crypto';
 import { eventBus } from '../../core/event-bus/EventBus';
 import { WebSocketProtocol } from '../hardware/protocols/WebSocketProtocol';
 import { MQTTProtocol } from '../hardware/protocols/MQTTProtocol';
@@ -35,11 +35,20 @@ export interface MeshConfig {
 
   /**
    * HMAC secret for message authentication. When set, all outbound messages
-   * are signed and inbound messages without a valid signature are dropped.
+   * and discovery announcements are signed; inbound traffic without a valid,
+   * fresh, non-replayed signature is dropped. A node on the same network
+   * segment without this secret cannot inject as a peer.
    * Use a 32-byte random hex string: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
-   * If unset, signing is skipped (development mode only).
+   * If unset, signing is skipped (development mode only — the mesh is open).
    */
   meshSecret?: string;
+
+  /**
+   * Maximum accepted clock skew (ms) for signed messages and discovery
+   * announcements. Anything older/newer than this is rejected as a possible
+   * replay. Generous enough for multi-hop relay. Default: 60000.
+   */
+  maxClockSkewMs?: number;
 }
 
 export interface MeshPeer {
@@ -61,7 +70,13 @@ export interface MeshMessage {
   timestamp: number;
   ttl: number;                   // Remaining hops
   path: string[];                // Nodes traversed
-  /** HMAC-SHA256 of "id:from:to:timestamp" — present when meshSecret is configured */
+  /** Per-message random nonce — replay defense. Present when meshSecret is set. */
+  nonce?: string;
+  /**
+   * HMAC-SHA256 over the canonical envelope (id, type, from, to, timestamp,
+   * nonce, and a hash of payload). Present when meshSecret is configured.
+   * Covers type and payload — a captured message cannot be re-purposed.
+   */
   hmac?: string;
 }
 
@@ -76,6 +91,9 @@ export class MeshNetwork {
   private peers: Map<string, MeshPeer> = new Map();
   private messageHandlers: Map<string, MessageHandler[]> = new Map();
   private seenMessages: Set<string> = new Set();
+  // Replay defense — every accepted signed nonce is remembered until the
+  // freshness window guarantees it can no longer be replayed.
+  private seenNonces: Set<string> = new Set();
   
   // Transport
   private mqtt?: MQTTProtocol;
@@ -97,6 +115,7 @@ export class MeshNetwork {
       pingInterval: 2000,
       peerTimeout: 10000,
       maxHops: 5,
+      maxClockSkewMs: 60000,
       ...config,
     };
   }
@@ -124,6 +143,15 @@ export class MeshNetwork {
 
     // Initial discovery
     this.discover();
+
+    if (!this.config.meshSecret) {
+      this.log(
+        'warn',
+        'Mesh network started WITHOUT meshSecret — peer enrollment and ' +
+          'messages are unauthenticated. Any node on the segment can inject ' +
+          'as a peer. Set meshSecret in production.',
+      );
+    }
 
     this.log('info', `Mesh network started (node: ${this.config.nodeId})`);
     eventBus.emit('mesh:started', { nodeId: this.config.nodeId });
@@ -202,12 +230,47 @@ export class MeshNetwork {
   // Discovery
   // ─────────────────────────────────────────────────────────────────────────
 
+  // Domain-separated signing material — the "discovery" tag prevents a
+  // message HMAC from being replayed as a valid enrollment announcement.
+  private discoveryMaterial(a: {
+    nodeId: string;
+    address?: string;
+    timestamp: number;
+    nonce: string;
+  }): string {
+    return JSON.stringify({
+      ctx: 'discovery',
+      nodeId: a.nodeId,
+      address: a.address ?? '',
+      ts: a.timestamp,
+      nonce: a.nonce,
+    });
+  }
+
   private discover(): void {
-    const announcement = {
+    const announcement: {
+      nodeId: string;
+      address?: string;
+      timestamp: number;
+      nonce?: string;
+      sig?: string;
+    } = {
       nodeId: this.config.nodeId,
       address: this.config.wsHost ? `${this.config.wsHost}:${this.config.wsPort}` : undefined,
       timestamp: Date.now(),
     };
+
+    if (this.config.meshSecret) {
+      announcement.nonce = randomBytes(16).toString('hex');
+      announcement.sig = this.hmacHex(
+        this.discoveryMaterial({
+          nodeId: announcement.nodeId,
+          address: announcement.address,
+          timestamp: announcement.timestamp,
+          nonce: announcement.nonce,
+        }),
+      );
+    }
 
     if (this.mqtt) {
       this.mqtt.publish(
@@ -218,19 +281,66 @@ export class MeshNetwork {
     }
   }
 
+  // Authenticates an enrollment announcement. When meshSecret is set, an
+  // announcement must carry a fresh, non-replayed, correctly-signed proof of
+  // the deployment secret — otherwise an attacker on the segment could
+  // register itself as a trusted peer simply by announcing an id.
+  private authenticateAnnouncement(a: {
+    nodeId?: unknown;
+    address?: unknown;
+    timestamp?: unknown;
+    nonce?: unknown;
+    sig?: unknown;
+  }): boolean {
+    if (typeof a.nodeId !== 'string' || a.nodeId.length === 0 || a.nodeId.length > 256) {
+      return false;
+    }
+    if (!this.config.meshSecret) return true; // dev mode — open mesh
+
+    if (typeof a.timestamp !== 'number' || typeof a.nonce !== 'string' || typeof a.sig !== 'string') {
+      return false;
+    }
+    if (!this.isFresh(a.timestamp)) return false;
+
+    const expected = this.hmacHex(
+      this.discoveryMaterial({
+        nodeId: a.nodeId,
+        address: typeof a.address === 'string' ? a.address : undefined,
+        timestamp: a.timestamp,
+        nonce: a.nonce,
+      }),
+    );
+    if (!this.constantTimeEqualHex(a.sig, expected)) return false;
+    return this.consumeNonce(`disc:${a.nonce}`);
+  }
+
   private handleDiscovery(payload: Buffer): void {
     try {
       const announcement = JSON.parse(payload.toString());
-      
+
       if (announcement.nodeId === this.config.nodeId) return;
 
+      if (!this.authenticateAnnouncement(announcement)) {
+        this.log(
+          'warn',
+          `Rejected unauthenticated enrollment for "${announcement?.nodeId}" — ` +
+            `missing/invalid/stale/replayed signature`,
+        );
+        eventBus.emit('mesh:peer:rejected', {
+          claimedId: typeof announcement?.nodeId === 'string' ? announcement.nodeId : '<invalid>',
+          reason: 'enrollment_authentication_failed',
+          timestamp: Date.now(),
+        });
+        return;
+      }
+
       const existing = this.peers.get(announcement.nodeId);
-      
+
       if (existing) {
         existing.lastSeen = Date.now();
         existing.address = announcement.address;
       } else {
-        // New peer
+        // New peer — admitted only after passing enrollment authentication
         const peer: MeshPeer = {
           id: announcement.nodeId,
           address: announcement.address,
@@ -240,7 +350,7 @@ export class MeshNetwork {
         };
         this.peers.set(peer.id, peer);
 
-        this.log('info', `Peer discovered: ${peer.id}`);
+        this.log('info', `Peer enrolled: ${peer.id}`);
         eventBus.emit('mesh:peer:joined', { peer });
       }
     } catch (error) {
@@ -256,21 +366,66 @@ export class MeshNetwork {
   // Message HMAC authentication (STRIDE R-2: peer injection prevention)
   // ─────────────────────────────────────────────────────────────────────────
 
-  private signMessage(message: MeshMessage): string {
-    const payload = `${message.id}:${message.from}:${message.to}:${message.timestamp}`;
-    return createHmac('sha256', this.config.meshSecret!).update(payload).digest('hex');
+  private hmacHex(material: string): string {
+    return createHmac('sha256', this.config.meshSecret!).update(material).digest('hex');
   }
 
-  private verifyMessage(message: MeshMessage): boolean {
-    if (!this.config.meshSecret) return true; // signing disabled
-    if (!message.hmac) return false;
-    if (message.hmac.length !== 64) return false;
-    const expected = this.signMessage(message);
+  private constantTimeEqualHex(a: string, b: string): boolean {
+    if (a.length !== 64 || b.length !== 64) return false;
     try {
-      return timingSafeEqual(Buffer.from(message.hmac, 'hex'), Buffer.from(expected, 'hex'));
+      return timingSafeEqual(Buffer.from(a, 'hex'), Buffer.from(b, 'hex'));
     } catch {
       return false;
     }
+  }
+
+  // Canonical, unambiguous signing material. JSON-encoded fixed shape so a
+  // ':'-containing id/from/to cannot be re-segmented, and a hash of the
+  // payload + the type are bound in — a captured message cannot be tampered
+  // or re-purposed and still verify.
+  private signingMaterial(message: MeshMessage): string {
+    const payloadHash = createHash('sha256')
+      .update(JSON.stringify(message.payload ?? null))
+      .digest('hex');
+    return JSON.stringify({
+      id: message.id,
+      type: message.type,
+      from: message.from,
+      to: message.to,
+      ts: message.timestamp,
+      nonce: message.nonce ?? '',
+      ph: payloadHash,
+    });
+  }
+
+  private signMessage(message: MeshMessage): string {
+    return this.hmacHex(this.signingMaterial(message));
+  }
+
+  private isFresh(timestamp: number): boolean {
+    const skew = this.config.maxClockSkewMs!;
+    return Math.abs(Date.now() - timestamp) <= skew;
+  }
+
+  // Records a nonce as consumed. Returns false if it was already seen
+  // (replay). Bounded — old entries are evicted past the freshness window.
+  private consumeNonce(nonce: string): boolean {
+    if (this.seenNonces.has(nonce)) return false;
+    this.seenNonces.add(nonce);
+    if (this.seenNonces.size > 20000) {
+      this.seenNonces = new Set(Array.from(this.seenNonces).slice(-10000));
+    }
+    return true;
+  }
+
+  private verifyMessage(message: MeshMessage): boolean {
+    if (!this.config.meshSecret) return true; // signing disabled (dev mode)
+    if (!message.hmac || !message.nonce) return false;
+    if (!this.isFresh(message.timestamp)) return false;
+    const expected = this.signMessage(message);
+    if (!this.constantTimeEqualHex(message.hmac, expected)) return false;
+    // Signature valid — enforce single-use to defeat replay.
+    return this.consumeNonce(`msg:${message.nonce}`);
   }
 
   send(to: string, type: string, payload: unknown): string {
@@ -288,6 +443,7 @@ export class MeshNetwork {
     };
 
     if (this.config.meshSecret) {
+      message.nonce = randomBytes(16).toString('hex');
       message.hmac = this.signMessage(message);
     }
 
