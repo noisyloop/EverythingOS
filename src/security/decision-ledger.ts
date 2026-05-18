@@ -139,6 +139,13 @@ export interface LedgerEntry extends DecisionLedgerInput {
   ledgerId: string;
   recordedAt: string;
   recordedAtMs: number;
+  /**
+   * Hash of the previous ledger entry, forming a tamper-evident chain
+   * (STRIDE T-4). 'GENESIS' for the first entry. Deleting or reordering any
+   * entry breaks the next entry's link. Absent on legacy entries written
+   * before the chain existed — verifyChain() tolerates those.
+   */
+  previousHash: string;
   entryHash: string;
 }
 
@@ -148,6 +155,14 @@ export interface LedgerVerificationResult {
   reason?: string;
   computedHash?: string;
   storedHash?: string;
+}
+
+export interface LedgerChainResult {
+  valid: boolean;
+  totalEntries: number;
+  /** 0-based index of the entry where the chain broke, if any */
+  brokenAt?: number;
+  reason?: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -160,6 +175,10 @@ const LEDGER_FILE_PATH = resolve(
 
 const INDEX_LIMIT = 50_000;
 const ledgerIndex = new Map<string, LedgerEntry>();
+
+// Head of the tamper-evident chain (STRIDE T-4). Bootstrapped from the last
+// entry on disk in initialize() so appends keep chaining across restarts.
+let lastEntryHash = 'GENESIS';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Async write stream — non-blocking disk I/O (mirrors audit-log.ts pattern)
@@ -272,9 +291,11 @@ export const DecisionLedger = {
       ledgerId,
       recordedAt: now.toISOString(),
       recordedAtMs: now.getTime(),
+      previousHash: lastEntryHash,
     };
 
     const entry: LedgerEntry = { ...partial, entryHash: computeEntryHash(partial) };
+    lastEntryHash = entry.entryHash;
 
     // Index in memory — evict oldest if over limit
     if (ledgerIndex.size >= INDEX_LIMIT) {
@@ -364,6 +385,76 @@ export const DecisionLedger = {
     }
 
     return { valid: true, ledgerId };
+  },
+
+  /**
+   * Verify the whole-ledger tamper-evident chain (STRIDE T-4). Streams the
+   * file (no OOM, STRIDE D-4) and fails closed on the first broken link:
+   *   - a recomputed entryHash that doesn't match (content tampered), or
+   *   - a previousHash that doesn't match the prior entry's hash (an entry
+   *     was deleted, reordered, or inserted).
+   * Legacy entries written before the chain existed have no `previousHash`;
+   * their per-entry hash is still checked but the link check is skipped, and
+   * the chain is enforced strictly from the first chained entry onward.
+   */
+  async verifyChain(): Promise<LedgerChainResult> {
+    if (!existsSync(LEDGER_FILE_PATH)) return { valid: true, totalEntries: 0 };
+
+    let running = 'GENESIS';
+    let totalEntries = 0;
+
+    const rl = createInterface({
+      input: createReadStream(LEDGER_FILE_PATH, { encoding: 'utf8' }),
+      crlfDelay: Infinity,
+    });
+
+    for await (const rawLine of rl) {
+      const line = rawLine.trim();
+      if (!line) continue;
+
+      let entry: LedgerEntry;
+      try {
+        entry = JSON.parse(line) as LedgerEntry;
+      } catch {
+        rl.close();
+        return {
+          valid: false,
+          totalEntries,
+          brokenAt: totalEntries,
+          reason: `JSON parse error at entry ${totalEntries + 1}`,
+        };
+      }
+
+      const { entryHash, ...rest } = entry;
+      if (computeEntryHash(rest) !== entryHash) {
+        rl.close();
+        return {
+          valid: false,
+          totalEntries,
+          brokenAt: totalEntries,
+          reason: `Entry hash mismatch at entry ${totalEntries + 1} — content modified after recording`,
+        };
+      }
+
+      // Link check only for chained entries. Legacy entries (no previousHash)
+      // are content-verified above; the chain resumes from their hash.
+      if (typeof entry.previousHash === 'string') {
+        if (entry.previousHash !== running) {
+          rl.close();
+          return {
+            valid: false,
+            totalEntries,
+            brokenAt: totalEntries,
+            reason: `Chain broken at entry ${totalEntries + 1} — previousHash does not match (entry deleted, reordered, or inserted)`,
+          };
+        }
+      }
+
+      running = entryHash;
+      totalEntries++;
+    }
+
+    return { valid: true, totalEntries };
   },
 
   /**
@@ -489,6 +580,25 @@ export const DecisionLedger = {
     }
     if (!existsSync(LEDGER_FILE_PATH)) {
       writeFileSync(LEDGER_FILE_PATH, '', { encoding: 'utf8' });
+      lastEntryHash = 'GENESIS';
+      return;
+    }
+    // Bootstrap the chain head from the last entry on disk so appends keep
+    // chaining across restarts (STRIDE T-4).
+    const lines = readFileSync(LEDGER_FILE_PATH, 'utf8')
+      .split('\n')
+      .filter((l) => l.trim().length > 0);
+    lastEntryHash = 'GENESIS';
+    for (let i = lines.length - 1; i >= 0; i--) {
+      try {
+        const last = JSON.parse(lines[i]) as LedgerEntry;
+        if (typeof last.entryHash === 'string' && last.entryHash) {
+          lastEntryHash = last.entryHash;
+          break;
+        }
+      } catch {
+        // Skip trailing malformed lines; keep scanning backward.
+      }
     }
   },
 };
