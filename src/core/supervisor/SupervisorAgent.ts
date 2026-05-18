@@ -36,6 +36,8 @@ export class SupervisorAgent {
   // ─────────────────────────────────────────────────────────────────────────────
 
   start(): void {
+    // STRIDE E-3: freeze policy store — no runtime policy injection after startup
+    this.policyEngine.lock();
     this.checkInterval = setInterval(() => this.performHealthChecks(), this.checkIntervalMs);
     eventBus.emit('supervisor:started', {});
   }

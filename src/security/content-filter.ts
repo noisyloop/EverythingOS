@@ -6,6 +6,7 @@
  */
 
 import { AuditLogger, hashContent } from './audit-log';
+import { re2Pattern, dotAllToRE2 } from './safe-regex';
 
 export interface FilterOptions {
   agentId: string;
@@ -21,42 +22,46 @@ export interface FilterResult {
   confidenceScore?: number;
 }
 
+// STRIDE T-6: compiled with RE2 for guaranteed linear-time matching.
+// The suspicious_code_pattern originally used /gs (dotAll); rewritten with
+// [\s\S]{0,500} so RE2 can match across newlines without backtracking risk.
 const BLOCK_PATTERNS: Array<{ pattern: RegExp; name: string }> = [
   // Jailbreak confirmation
-  { pattern: /i('m| am) (now )?free(d)? (from|of) (my )?(restrictions?|guidelines?|rules?|training)/gi, name: 'jailbreak_confirmed' },
-  { pattern: /i('m| am) (now )?operating (without|beyond) (my )?(restrictions?|guidelines?|constraints?)/gi, name: 'jailbreak_confirmed' },
-  { pattern: /as (a )?dan(,| )/gi, name: 'dan_jailbreak_confirmed' },
-  { pattern: /in (developer|dev|jailbreak|unrestricted) mode/gi, name: 'mode_override_confirmed' },
+  { pattern: re2Pattern("i('m| am) (now )?free(d)? (from|of) (my )?(restrictions?|guidelines?|rules?|training)", 'gi'), name: 'jailbreak_confirmed' },
+  { pattern: re2Pattern("i('m| am) (now )?operating (without|beyond) (my )?(restrictions?|guidelines?|constraints?)", 'gi'), name: 'jailbreak_confirmed' },
+  { pattern: re2Pattern('as (a )?dan(,| )', 'gi'), name: 'dan_jailbreak_confirmed' },
+  { pattern: re2Pattern('in (developer|dev|jailbreak|unrestricted) mode', 'gi'), name: 'mode_override_confirmed' },
 
-  // Malware / harmful code — broad match covering "Here is working malware", "Here's the malware you requested"
-  { pattern: /here\b.{0,60}(malware|ransomware|keylogger|exploit|payload|shellcode)/gi, name: 'harmful_code' },
-  { pattern: /import\s+os[;\s].*os\.(system|popen|exec)/gs, name: 'suspicious_code_pattern' },
+  // Malware / harmful code
+  { pattern: re2Pattern('here\\b.{0,60}(malware|ransomware|keylogger|exploit|payload|shellcode)', 'gi'), name: 'harmful_code' },
+  // dotAll rewrite: [\s\S]{0,500} replaces .* with s flag (STRIDE T-6)
+  { pattern: re2Pattern(dotAllToRE2('import\\s+os[;\\s].*os\\.(system|popen|exec)'), 'gi'), name: 'suspicious_code_pattern' },
 
   // Explosives / weapons instructions
-  { pattern: /here\b.{0,60}(make|making|create|creating|build|building).{0,40}(c4|explosive|bomb|weapon)/gi, name: 'physical_harm_instructions' },
-  { pattern: /step[s]?\s+(to|for)\s+(making|creating|building|synthesizing)\s+(a\s+)?(bomb|explosive|poison|nerve\s+agent|weapon)/gi, name: 'physical_harm_instructions' },
+  { pattern: re2Pattern('here\\b.{0,60}(make|making|create|creating|build|building).{0,40}(c4|explosive|bomb|weapon)', 'gi'), name: 'physical_harm_instructions' },
+  { pattern: re2Pattern('step[s]?\\s+(to|for)\\s+(making|creating|building|synthesizing)\\s+(a\\s+)?(bomb|explosive|poison|nerve\\s+agent|weapon)', 'gi'), name: 'physical_harm_instructions' },
 
   // Drug synthesis
-  { pattern: /to\s+(synthesize|make|create|produce)\s+\w+\s+you\s+will\s+need/gi, name: 'synthesis_instructions' },
-  { pattern: /(synthesize|synthesis\s+of)\s+(methamphetamine|meth|fentanyl|heroin|cocaine)/gi, name: 'drug_synthesis' },
+  { pattern: re2Pattern('to\\s+(synthesize|make|create|produce)\\s+\\w+\\s+you\\s+will\\s+need', 'gi'), name: 'synthesis_instructions' },
+  { pattern: re2Pattern('(synthesize|synthesis\\s+of)\\s+(methamphetamine|meth|fentanyl|heroin|cocaine)', 'gi'), name: 'drug_synthesis' },
 
   // CSAM
-  { pattern: /(sexual|explicit|nude|naked).{0,50}(minor|child|kid|underage|teen|youth)/gi, name: 'csam_indicator' },
-  { pattern: /(minor|child|kid|underage|teen|youth).{0,50}(sexual|explicit|nude|naked)/gi, name: 'csam_indicator' },
+  { pattern: re2Pattern('(sexual|explicit|nude|naked).{0,50}(minor|child|kid|underage|teen|youth)', 'gi'), name: 'csam_indicator' },
+  { pattern: re2Pattern('(minor|child|kid|underage|teen|youth).{0,50}(sexual|explicit|nude|naked)', 'gi'), name: 'csam_indicator' },
 ];
 
 const FLAG_PATTERNS: Array<{ pattern: RegExp; name: string }> = [
-  { pattern: /i('m| am) (not )?(sure|certain) (if )?(i )?(should|can|am allowed to)/gi, name: 'uncertainty_about_constraints' },
-  { pattern: /(my |the )?(system prompt|instructions|context window|training)/gi, name: 'system_prompt_reference' },
-  { pattern: /\b(certainly|absolutely|definitely|undoubtedly)\b.{0,100}\b(fact|true|proven|confirmed)\b/gi, name: 'overconfident_claim' },
-  { pattern: /(you should|i recommend|buy|sell|invest).{0,50}(stock|crypto|bitcoin|ethereum|shares)/gi, name: 'financial_advice_unqualified' },
-  { pattern: /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g, name: 'email_in_output' },
+  { pattern: re2Pattern("i('m| am) (not )?(sure|certain) (if )?(i )?(should|can|am allowed to)", 'gi'), name: 'uncertainty_about_constraints' },
+  { pattern: re2Pattern('(my |the )?(system prompt|instructions|context window|training)', 'gi'), name: 'system_prompt_reference' },
+  { pattern: re2Pattern('(certainly|absolutely|definitely|undoubtedly).{0,100}(fact|true|proven|confirmed)', 'gi'), name: 'overconfident_claim' },
+  { pattern: re2Pattern('(you should|i recommend|buy|sell|invest).{0,50}(stock|crypto|bitcoin|ethereum|shares)', 'gi'), name: 'financial_advice_unqualified' },
+  { pattern: re2Pattern('[a-zA-Z0-9._%+\\-]+@[a-zA-Z0-9.\\-]+\\.[a-zA-Z]{2,}', 'g'), name: 'email_in_output' },
 ];
 
 const STRICT_FLAG_PATTERNS: Array<{ pattern: RegExp; name: string }> = [
-  { pattern: /run\s+(the\s+)?command|execute\s+(the\s+)?script|`[^`]{10,}`/gi, name: 'code_execution_suggestion' },
-  { pattern: /\b(delete|drop|remove|destroy|wipe|format|shutdown|terminate)\b.{0,50}\b(all|permanently|irreversible)/gi, name: 'irreversible_action_language' },
-  { pattern: /\b(sk-|ghp_|xoxb-|AKIA)[a-zA-Z0-9]{10,}/g, name: 'credential_in_output' },
+  { pattern: re2Pattern('run\\s+(the\\s+)?command|execute\\s+(the\\s+)?script|`[^`]{10,}`', 'gi'), name: 'code_execution_suggestion' },
+  { pattern: re2Pattern('(delete|drop|remove|destroy|wipe|format|shutdown|terminate).{0,50}(all|permanently|irreversible)', 'gi'), name: 'irreversible_action_language' },
+  { pattern: re2Pattern('(sk-|ghp_|xoxb-|AKIA)[a-zA-Z0-9]{10,}', 'g'), name: 'credential_in_output' },
 ];
 
 const MAX_NORMAL_OUTPUT_LENGTH = 8000;
