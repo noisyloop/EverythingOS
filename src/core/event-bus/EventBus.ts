@@ -32,11 +32,28 @@ export interface Subscription {
 
 // Per-source publish rate limit — prevents a compromised or runaway agent from
 // flooding the bus and starving other agents.
-const PUBLISH_RATE_LIMIT   = 200;        // max publishes per window
+const PUBLISH_RATE_LIMIT   = 200;        // max publishes per source per window
 const PUBLISH_RATE_WINDOW  = 60_000;     // 60-second sliding window
+
+// Global ceiling across all sources combined (STRIDE D-2).
+// Prevents coordinated flooding by many agents acting simultaneously.
+const GLOBAL_RATE_LIMIT  = 10_000;      // max total publishes per window
+const GLOBAL_RATE_WINDOW = 60_000;
 
 interface PublishRateEntry { count: number; windowStart: number }
 const publishRates = new Map<string, PublishRateEntry>();
+let globalRate: PublishRateEntry = { count: 0, windowStart: Date.now() };
+
+function checkGlobalRateLimit(): boolean {
+  const now = Date.now();
+  if (now - globalRate.windowStart > GLOBAL_RATE_WINDOW) {
+    globalRate = { count: 1, windowStart: now };
+    return true;
+  }
+  if (globalRate.count >= GLOBAL_RATE_LIMIT) return false;
+  globalRate.count++;
+  return true;
+}
 
 function checkPublishRateLimit(source: string): boolean {
   const now = Date.now();
@@ -57,7 +74,7 @@ setInterval(() => {
   for (const [src, entry] of publishRates) {
     if (entry.windowStart < cutoff) publishRates.delete(src);
   }
-}, 5 * 60_000);
+}, 5 * 60_000).unref();
 
 export class EventBus {
   private subscriptions: Map<string, Subscription[]> = new Map();
@@ -78,6 +95,15 @@ export class EventBus {
 
   emit<T>(type: string, payload: T, options: Partial<Omit<Event<T>, 'id' | 'type' | 'payload' | 'timestamp'>> = {}): string {
     const source = options.source || 'system';
+
+    if (!checkGlobalRateLimit()) {
+      throw new Error(
+        `[EventBus] Global publish rate limit exceeded ` +
+        `(${GLOBAL_RATE_LIMIT} events/${GLOBAL_RATE_WINDOW / 1000}s across all sources). ` +
+        `System may be under coordinated flooding attack.`
+      );
+    }
+
     if (!checkPublishRateLimit(source)) {
       throw new Error(
         `[EventBus] Publish rate limit exceeded for source "${source}" ` +

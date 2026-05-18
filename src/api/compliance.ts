@@ -28,7 +28,7 @@ export async function complianceStatusHandler(
   res: { json: (data: unknown) => void; status: (code: number) => { json: (data: unknown) => void } }
 ): Promise<void> {
   const status = AgentRegistry.complianceStatus();
-  const auditVerification = AuditLogger.verifyChain();
+  const auditVerification = await AuditLogger.verifyChain();
 
   const highRiskWithoutApprovalGate =
     status.tierBreakdown[AgentRiskTier.HIGH] > 0 && !status.approvalGateActive;
@@ -149,10 +149,10 @@ export function auditQueryHandler(
 // GET /api/compliance/audit/verify
 // ─────────────────────────────────────────────────────────────────────────────
 
-export function auditVerifyHandler(
+export async function auditVerifyHandler(
   _req: unknown,
   res: { json: (data: unknown) => void }
-): void {
-  const result = AuditLogger.verifyChain();
+): Promise<void> {
+  const result = await AuditLogger.verifyChain();
   res.json(result);
 }

@@ -49,6 +49,7 @@ import { createReadStream } from 'fs';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { resolve } from 'path';
 import { AuditLogger } from './audit-log';
+import { getSecret } from './secrets-provider';
 import type { LLMRouter, LLMRequest } from '../runtime/LLMRouter';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -171,12 +172,23 @@ const FINGERPRINT_INDEX = resolve(FINGERPRINT_DIR, 'fingerprints.json');
 const FINGERPRINT_SIG   = resolve(FINGERPRINT_DIR, 'fingerprints.sig');
 const VIOLATION_LOG     = resolve(FINGERPRINT_DIR, 'violations.jsonl');
 
-// Reuse EOS_AGENT_SECRET to sign the fingerprint baseline. If an attacker can
-// modify the baseline JSON they also need the secret to forge a valid signature.
+// Dedicated key for fingerprint signing — separate from EOS_AGENT_SECRET (STRIDE T-2).
+// Compromise of the agent session secret does not allow forging fingerprint baselines.
+// Resolved via SecretsProvider so it can be backed by Vault/AWS SM in production.
 const FINGERPRINT_SIGNING_KEY: string = (() => {
-  const key = process.env.EOS_AGENT_SECRET;
+  const key = getSecret('MODEL_GUARD_SIGN_KEY') ?? getSecret('EOS_AGENT_SECRET');
   if (!key) {
-    // In dev, use a stable derived key so the baseline survives restarts
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error(
+        '[ModelGuard] MODEL_GUARD_SIGN_KEY is required in production. ' +
+        'Generate with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"'
+      );
+    }
+    console.warn(
+      '[ModelGuard] WARNING: MODEL_GUARD_SIGN_KEY not set. ' +
+      'Using a derived dev key — fingerprint baseline will be invalidated if this key changes. ' +
+      'Set MODEL_GUARD_SIGN_KEY in .env for a stable baseline.'
+    );
     return createHmac('sha256', 'dev-model-guard').update('fingerprint-baseline').digest('hex');
   }
   return key;
