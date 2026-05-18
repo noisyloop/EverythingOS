@@ -81,7 +81,23 @@ export const AgentRegistry = {
    */
   register(agent: Agent): void {
     if (registry.has(agent.id)) {
-      this.unregister(agent.id);
+      // STRIDE E-5: agent identity is the trust anchor (e.g. ApprovalGate's
+      // trustedAgents). Silently unregistering and overwriting let a
+      // malicious agent seize a trusted agent's id. Reject the collision
+      // and record it as a security event instead.
+      AuditLogger.log({
+        agentId: agent.id,
+        event: 'safety.violation',
+        metadata: {
+          action: 'agent_id_collision_rejected',
+          name: agent.name,
+          type: agent.type,
+        },
+      });
+      throw new Error(
+        `[AgentRegistry] Agent id "${agent.id}" is already registered. ` +
+        `Refusing to overwrite — unregister the existing agent first if this is intentional.`,
+      );
     }
 
     // Track if ApprovalGateAgent is being registered

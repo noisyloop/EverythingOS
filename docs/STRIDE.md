@@ -13,19 +13,21 @@
 
 ## Finding Summary
 
-✅ = Resolved  ⚠️ = Partially mitigated (inherent architecture constraint)  🔬 = Research-grade (formal proof required)
+✅ = Resolved  ⚠️ = Partially mitigated  🔬 = Research-grade (formal proof required)  ❌ = Claimed resolved but NOT implemented in code
+
+> **Verification audit 2026-05-18:** every `✅` was re-checked against the actual code after D-6 was found to be marked resolved without an implementation. Statuses below were corrected: **E-2** and **T-4** were aspirational (downgraded ❌); **S-1, S-3, T-2** were oversold (downgraded ⚠️); **T-5** and **E-5** were genuine gaps now actually fixed (✅, dated). The remaining ✅ findings were confirmed implemented and wired.
 
 | ID | Category | Severity | Status | Component | One-line description |
 |---|---|---|---|---|---|
-| S-1 | Spoofing | HIGH | ✅ Ph1 | `agent-auth.ts` | Token registry is readable in-process; token theft enables HMAC forgery |
-| S-2 | Spoofing | CRITICAL | ✅ Ph1 | `ApprovalGateAgent.ts` | Any agent can emit a forged `approval:decision` event to self-approve |
-| S-3 | Spoofing | MEDIUM | ✅ Ph1 | `model-guard.ts` | `ModelGuard.approve()` has no caller authentication gate |
+| S-1 | Spoofing | HIGH | ⚠️ Ph1 | `agent-auth.ts` | Per-call signing blocks *external* replay; in-process registry theft still unaddressed (audit: not in any phase) |
+| S-2 | Spoofing | CRITICAL | ✅ Ph1 | `ApprovalGateAgent.ts` | Fixed: no EventBus approval intake, HMAC `submitDecision()`. Residual: `server.ts` still exposes unauthenticated `/api/approvals/:id/{approve,deny}` emitting an *unconsumed* `approval:decision` (dead code / re-introduction footgun) |
+| S-3 | Spoofing | MEDIUM | ⚠️ Ph1 | `model-guard.ts` | No caller authentication on `approve()`; only the post-startup `modelsLocked` lock + free-form `approvedBy`. "Caller gate" overstated |
 | S-4 | Spoofing | MEDIUM | ✅ Ph2 | `PolicyEngine.ts` | `supervisor.addPolicy()` is callable by any in-process code |
 | T-1 | Tampering | MEDIUM | ✅ Ph2 | `audit-log.ts` | Log file truncation/replacement undetected at startup |
-| T-2 | Tampering | HIGH | ✅ Ph3 | `model-guard.ts` | Fingerprint baseline can be forged if `EOS_AGENT_SECRET` is compromised |
+| T-2 | Tampering | HIGH | ⚠️ Ph3 | `model-guard.ts` | Key falls back to `EOS_AGENT_SECRET` (and a hardcoded dev key) when `MODEL_GUARD_SIGN_KEY` is unset — not cryptographically separate unless explicitly configured |
 | T-3 | Tampering | HIGH | ✅ Ph1 | `agent-auth.ts` | Revocation log has no hash chain; entries can be deleted or corrupted |
-| T-4 | Tampering | MEDIUM | ✅ Ph1 | `decision-ledger.ts` | Entry deletions are undetectable; no cross-entry hash chain |
-| T-5 | Tampering | MEDIUM | ✅ Ph1 | `plugin-sandbox.ts` | Plugin return values are unsanitized before use |
+| T-4 | Tampering | MEDIUM | ❌ | `decision-ledger.ts` | NOT IMPLEMENTED: only a per-entry `entryHash` exists — no `previousHash`, no `verifyChain`. Entry deletion/reordering is undetectable. Phase-1 "decision ledger hash chain" was aspirational |
+| T-5 | Tampering | MEDIUM | ✅ 2026-05-18 | `plugin-sandbox.ts` | Was a gap (raw `resolve(msg.result)`). NOW FIXED: every string in a plugin result passes the injection pipeline via bounded recursive `sanitizePluginResult()` |
 | T-6 | Tampering | LOW | ✅ Ph4 | `sanitize.ts` / `content-filter.ts` | V8 backtracking regex; rewritten with RE2 (linear time) |
 | R-1 | Repudiation | HIGH | ✅ Ph2 | `ApprovalGateAgent.ts` | `approvedBy` is a free-form string; no cryptographic identity binding |
 | R-2 | Repudiation | LOW | ✅ Ph2 | `audit-log.ts` | Crash flush handlers ensure pending writes reach disk |
@@ -42,10 +44,10 @@
 | D-5 | DoS | LOW | 🔬 | `content-filter.ts` | RE2 eliminates backtracking risk; formal proof of nonce protocol pending |
 | D-6 | DoS | LOW | ✅ Ph1 | `glasswally/index.ts` | `lineBuffer` capped; Glasswally rate-limited and HMAC-verified |
 | E-1 | EoP | CRITICAL | ✅ Ph1 | `ApprovalGateAgent.ts` | Approval via authenticated out-of-band channel + challenge nonce |
-| E-2 | EoP | CRITICAL | ✅ Ph2 | Architecture | HIGH-tier agents in dedicated `worker_thread` (separate V8 heap) |
+| E-2 | EoP | CRITICAL | ❌ | Architecture | NOT IMPLEMENTED: `IsolatedAgentRunner` (worker_threads) exists but has zero callers. `AgentRegistry.start()` → `agent._internalStart()` runs every agent in-process. The architecture diagram below ("single V8 heap — all agents share this boundary") is the real state |
 | E-3 | EoP | HIGH | ✅ Ph4 | `SupervisorAgent.ts` | `policyEngine.lock()` called in `start()`; runtime injection rejected |
 | E-4 | EoP | HIGH | ✅ Ph4 | `model-guard.ts` | `lockModels()` wired via `finalizeStartup()`; allowlist frozen at startup |
-| E-5 | EoP | MEDIUM | ✅ Ph1 | `ApprovalGateAgent.ts` | `trustedAgents` bypass depends on registry preventing ID collisions |
+| E-5 | EoP | MEDIUM | ✅ 2026-05-18 | `core/AgentRegistry.ts` | Was a gap (`register()` silently unregistered+overwrote a duplicate id). NOW FIXED: collision is rejected with a thrown error + `safety.violation` audit event |
 
 ---
 
@@ -586,6 +588,21 @@ The following controls are implemented and working. This section provides contex
 ---
 
 ## Implementation Status
+
+> ### ⚠️ Verification Audit Corrections — 2026-05-18
+>
+> The phase records below are the *original* claims. A line-by-line code
+> audit found several were not implemented (the D-6 pattern). The **Finding
+> Summary table above is now authoritative**. Corrections:
+>
+> - **E-2** (Phase 2 "HIGH-tier agents in dedicated worker_thread") — ❌ **not implemented.** `IsolatedAgentRunner` exists but is never wired; all agents run in-process.
+> - **T-4** (Phase 1 "decision ledger hash chain") — ❌ **not implemented.** Only a per-entry hash; no cross-entry chain.
+> - **S-3** (Phase 1 "ModelGuard caller gate") — ⚠️ overstated; no caller authentication, only the post-startup lock.
+> - **S-1** (table-marked Phase 1) — ⚠️ external replay only; never actually in a phase.
+> - **T-2** (Phase 3 "key separate from EOS_AGENT_SECRET") — ⚠️ falls back to `EOS_AGENT_SECRET` unless explicitly configured.
+> - **T-5** (Phase 1 "plugin return value sanitization") — was a gap; **now genuinely fixed 2026-05-18.**
+> - **E-5** (Phase 1 "registry prevents ID collisions") — was a gap; **now genuinely fixed 2026-05-18.**
+> - **S-2/E-1** — core fix real; residual unauthenticated `server.ts` approval endpoints emit an unconsumed event (dead-code footgun).
 
 ### ✅ Phase 1 — Critical Baseline (complete)
 
