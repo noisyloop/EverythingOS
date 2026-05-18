@@ -6,7 +6,7 @@
  * Run: npx jest tests/integration/e2e.test.ts --verbose --forceExit
  */
 
-import { AuditLogger } from '../../src/security/audit-log';
+import { AuditLogger, flushAuditLog } from '../../src/security/audit-log';
 import { DecisionLedger } from '../../src/security/decision-ledger';
 import { QuarantineManager, QuarantineSeverity } from '../../src/security/quarantine';
 import { ModelGuard } from '../../src/security/model-guard';
@@ -367,10 +367,11 @@ describe('EverythingOS — End-to-End Integration', () => {
 
   // ── 11. Audit chain integrity ─────────────────────────────────────────────
 
-  test('11. Audit chain is valid after all test activity', () => {
+  test('11. Audit chain is valid after all test activity', async () => {
+    await flushAuditLog();
     const result = AuditLogger.verifyChain();
     expect(result.valid).toBe(true);
-    expect(result.totalEntries).toBeGreaterThan(0);  // correct field name
+    expect(result.totalEntries).toBeGreaterThan(0);
   });
 
   // ── 12. DecisionLedger ────────────────────────────────────────────────────

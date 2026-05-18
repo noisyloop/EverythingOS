@@ -194,7 +194,7 @@ export abstract class Agent {
     await this.onStop();
 
     if (this._token) {
-      AgentAuthManager.revokeToken(this.id, 'agent_stopped');
+      AgentAuthManager.expireToken(this.id);
       this._token = null;
     }
 

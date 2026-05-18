@@ -456,8 +456,22 @@ export const AgentAuthManager = {
   },
 
   /**
+   * Expire a token on normal agent shutdown WITHOUT persisting a revocation.
+   * The agent can re-register in the same or a future process.
+   * Use this for clean lifecycle stops — use revokeToken() for security incidents.
+   */
+  expireToken(agentId: string): boolean {
+    const stored = tokenRegistry.get(agentId);
+    if (!stored) return false;
+    tokenRegistry.delete(agentId);
+    AuditLogger.log({ agentId, event: 'auth.token_revoked', metadata: { revokedBy: 'agent_stopped', persistent: false } });
+    return true;
+  },
+
+  /**
    * Revoke a token immediately. Persists the revocation to disk so it
    * survives restarts — the agent cannot re-register after revocation.
+   * Use for security incidents: quarantine, emergency stop, compromise.
    */
   revokeToken(agentId: string, revokedBy: string = 'system'): boolean {
     const stored = tokenRegistry.get(agentId);

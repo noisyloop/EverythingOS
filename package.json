@@ -13,7 +13,7 @@
     "start": "node dist/index.js",
     "api": "node dist/api/server.js",
     "dev": "tsx watch src/index.ts",
-    "test": "node -e \"try{require('fs').unlinkSync('./everythingos-audit.jsonl')}catch{}\" && jest",
+    "test": "node -e \"['./everythingos-audit.jsonl','./agent-revocations.jsonl','./everythingos-decisions.jsonl'].forEach(f=>{try{require('fs').unlinkSync(f)}catch{}})\" && jest",
     "test:security": "jest tests/security/ --verbose --forceExit",
     "audit:check": "npm audit --audit-level=high",
     "audit:fix": "npm audit fix",
@@ -48,6 +48,11 @@
     "testEnvironment": "node",
     "testMatch": [
       "**/tests/**/*.test.ts"
-    ]
+    ],
+    "globals": {
+      "ts-jest": {
+        "tsconfig": "./tsconfig.test.json"
+      }
+    }
   }
 }

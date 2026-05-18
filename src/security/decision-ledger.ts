@@ -478,6 +478,10 @@ export const DecisionLedger = {
   },
 
   initialize(): void {
+    if (ledgerStream && !ledgerStream.destroyed) {
+      ledgerStream.end();
+      ledgerStream = null;
+    }
     if (!existsSync(LEDGER_FILE_PATH)) {
       writeFileSync(LEDGER_FILE_PATH, '', { encoding: 'utf8' });
     }
