@@ -15,6 +15,7 @@ import { toolRegistry } from '../../services/tools';
 import { intentManager, Intent } from '../../runtime/IntentContract';
 import { ToolApprovalRequest } from '../../services/tools/ToolTypes';
 import { AuditLogger } from '../../security/audit-log';
+import { DecisionLedger, hashContent } from '../../security/decision-ledger';
 import { createHttpClient } from '../../security/http-guard';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -38,17 +39,19 @@ const APPROVAL_GATE_SECRET: string = (() => {
 })();
 
 // Token format: <hmac>:<minuteTimestamp>
-// HMAC = HMAC-SHA256("${approvalId}:${approved}:${approvedBy}:${minuteTs}", APPROVAL_GATE_SECRET)
+// HMAC = HMAC-SHA256("${approvalId}:${nonce}:${approved}:${approvedBy}:${minuteTs}", APPROVAL_GATE_SECRET)
+// The nonce is the per-approval challengeNonce stored server-side, binding the token to a
+// specific approval request and preventing token reuse across different requests (STRIDE R-1).
 // Tokens are valid for ±5 minutes from generation time.
 
-function generateApprovalToken(approvalId: string, approved: boolean, approvedBy: string): string {
+function generateApprovalToken(approvalId: string, nonce: string, approved: boolean, approvedBy: string): string {
   const minuteTs = Math.floor(Date.now() / 60_000);
-  const payload = `${approvalId}:${approved ? '1' : '0'}:${approvedBy}:${minuteTs}`;
+  const payload = `${approvalId}:${nonce}:${approved ? '1' : '0'}:${approvedBy}:${minuteTs}`;
   const hmac = createHmac('sha256', APPROVAL_GATE_SECRET).update(payload).digest('hex');
   return `${hmac}:${minuteTs}`;
 }
 
-function verifyApprovalToken(approvalId: string, approved: boolean, approvedBy: string, token: string): boolean {
+function verifyApprovalToken(approvalId: string, nonce: string, approved: boolean, approvedBy: string, token: string): boolean {
   const colonIdx = token.lastIndexOf(':');
   if (colonIdx === -1) return false;
   const hmac = token.slice(0, colonIdx);
@@ -59,7 +62,7 @@ function verifyApprovalToken(approvalId: string, approved: boolean, approvedBy: 
   const currentMinute = Math.floor(Date.now() / 60_000);
   if (Math.abs(currentMinute - minuteTs) > 5) return false;
 
-  const payload = `${approvalId}:${approved ? '1' : '0'}:${approvedBy}:${minuteTs}`;
+  const payload = `${approvalId}:${nonce}:${approved ? '1' : '0'}:${approvedBy}:${minuteTs}`;
   const expected = createHmac('sha256', APPROVAL_GATE_SECRET).update(payload).digest('hex');
   if (expected.length !== 64) return false;
   return timingSafeEqual(Buffer.from(hmac, 'hex'), Buffer.from(expected, 'hex'));
@@ -77,6 +80,8 @@ export interface PendingApproval {
   request: ToolApprovalRequest | Intent;
   summary: string;
   risk: 'low' | 'medium' | 'high' | 'critical';
+  /** Per-approval nonce included in HMAC tokens — binds token to this specific request (STRIDE R-1) */
+  challengeNonce: string;
   createdAt: number;
   expiresAt: number;
   notifiedChannels: ApprovalChannel[];
@@ -196,19 +201,20 @@ export class ApprovalGateAgent extends Agent {
    * Tokens are valid for ±5 minutes from generation time.
    */
   submitDecision(approvalId: string, approved: boolean, approvedBy: string, token: string): boolean {
-    if (!verifyApprovalToken(approvalId, approved, approvedBy, token)) {
+    // Look up pending first — nonce is server-side state, not client-supplied
+    const pending = this.pending.get(approvalId);
+    if (!pending) {
+      this.log('warn', `No pending approval found for ${approvalId}`);
+      return false;
+    }
+
+    if (!verifyApprovalToken(approvalId, pending.challengeNonce, approved, approvedBy, token)) {
       this.log('warn', `Approval decision rejected — invalid HMAC token for ${approvalId}`);
       AuditLogger.log({
         agentId: this.id,
         event: 'auth.token_rejected',
         metadata: { reason: 'invalid_approval_token', approvalId, approvedBy },
       });
-      return false;
-    }
-
-    const pending = this.pending.get(approvalId);
-    if (!pending) {
-      this.log('warn', `No pending approval found for ${approvalId}`);
       return false;
     }
 
@@ -222,10 +228,11 @@ export class ApprovalGateAgent extends Agent {
 
   /**
    * Generate an HMAC token for use with submitDecision().
+   * The nonce must match the challengeNonce stored on the PendingApproval (from getPending()).
    * Call this from a trusted context (CLI tool, webhook receiver) — not from agent code.
    */
-  static generateToken(approvalId: string, approved: boolean, approvedBy: string): string {
-    return generateApprovalToken(approvalId, approved, approvedBy);
+  static generateToken(approvalId: string, nonce: string, approved: boolean, approvedBy: string): string {
+    return generateApprovalToken(approvalId, nonce, approved, approvedBy);
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -247,6 +254,7 @@ export class ApprovalGateAgent extends Agent {
       request,
       summary: this.summarizeToolRequest(request),
       risk,
+      challengeNonce: randomBytes(16).toString('hex'),
       createdAt: Date.now(),
       expiresAt: Date.now() + this.gateConfig.defaultTimeout,
       notifiedChannels: [],
@@ -272,6 +280,7 @@ export class ApprovalGateAgent extends Agent {
       request: intent,
       summary: this.summarizeIntent(intent),
       risk,
+      challengeNonce: randomBytes(16).toString('hex'),
       createdAt: Date.now(),
       expiresAt: Date.now() + this.gateConfig.defaultTimeout,
       notifiedChannels: [],
@@ -343,8 +352,8 @@ export class ApprovalGateAgent extends Agent {
 
   private formatApprovalMessage(pending: PendingApproval): string {
     const riskLabel = { low: 'LOW', medium: 'MEDIUM', high: 'HIGH', critical: 'CRITICAL' };
-    const approveToken = generateApprovalToken(pending.id, true, 'approver');
-    const denyToken = generateApprovalToken(pending.id, false, 'approver');
+    const approveToken = generateApprovalToken(pending.id, pending.challengeNonce, true, 'approver');
+    const denyToken = generateApprovalToken(pending.id, pending.challengeNonce, false, 'approver');
     return [
       `APPROVAL REQUIRED [${riskLabel[pending.risk]}]`,
       ``,
@@ -427,6 +436,22 @@ export class ApprovalGateAgent extends Agent {
     this.log('info', `Approved ${pending.type} ${approvalId} by ${approvedBy}`);
     this.history.push({ approvalId, approved: true, approvedBy, reason, timestamp: Date.now() });
 
+    // Record in DecisionLedger for non-repudiable provenance (STRIDE R-1)
+    DecisionLedger.record({
+      agentId: this.id,
+      decisionType: 'approval.gate',
+      context: DecisionLedger.buildContext({ modelId: 'human', promptTemplate: 'approval-gate-v1' }),
+      inputHash: hashContent(pending.summary),
+      outputHash: hashContent(`${approvalId}:approved:${approvedBy}:${reason ?? ''}`),
+      outcome: { approvalId, decision: 'approved', approvedBy, reason, risk: pending.risk, type: pending.type },
+    });
+
+    AuditLogger.log({
+      agentId: this.id,
+      event: 'approval.granted',
+      metadata: { approvalId, approvedBy, reason, risk: pending.risk, type: pending.type },
+    });
+
     if (pending.type === 'tool') {
       toolRegistry.approve(approvalId, approvedBy);
     } else {
@@ -444,6 +469,22 @@ export class ApprovalGateAgent extends Agent {
 
     this.log('info', `Denied ${pending.type} ${approvalId} by ${deniedBy}: ${reason}`);
     this.history.push({ approvalId, approved: false, approvedBy: deniedBy, reason, timestamp: Date.now() });
+
+    // Record in DecisionLedger for non-repudiable provenance (STRIDE R-1)
+    DecisionLedger.record({
+      agentId: this.id,
+      decisionType: 'approval.gate',
+      context: DecisionLedger.buildContext({ modelId: 'human', promptTemplate: 'approval-gate-v1' }),
+      inputHash: hashContent(pending.summary),
+      outputHash: hashContent(`${approvalId}:denied:${deniedBy}:${reason}`),
+      outcome: { approvalId, decision: 'denied', deniedBy, reason, risk: pending.risk, type: pending.type },
+    });
+
+    AuditLogger.log({
+      agentId: this.id,
+      event: 'approval.denied',
+      metadata: { approvalId, deniedBy, reason, risk: pending.risk, type: pending.type },
+    });
 
     if (pending.type === 'tool') {
       toolRegistry.deny(approvalId, deniedBy, reason);

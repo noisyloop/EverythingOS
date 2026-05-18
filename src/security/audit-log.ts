@@ -274,6 +274,13 @@ export const AuditLogger = {
    * Call once at startup before any agents start.
    */
   initialize(): void {
+    // Close any open stream so subsequent writes go to the (re)created file,
+    // not a stale file descriptor pointing to a deleted inode.
+    if (logStream && !logStream.destroyed) {
+      logStream.end();
+      logStream = null;
+    }
+
     if (!existsSync(LOG_FILE_PATH)) {
       writeFileSync(LOG_FILE_PATH, '', { encoding: 'utf8' });
       lastHash = 'GENESIS';

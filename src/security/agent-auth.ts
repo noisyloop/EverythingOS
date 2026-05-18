@@ -333,16 +333,35 @@ function validateCall(
 // AgentAuthManager
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Locked after startup — prevents runtime token issuance by compromised agents
+let issuanceLocked = false;
+
 export const AgentAuthManager = {
   /**
+   * Prevent new token issuance after all startup agents are registered.
+   * Call once at startup after all agents have tokens. Any issueToken() call
+   * after this throws — a compromised agent cannot mint itself new credentials.
+   */
+  lockIssuance(): void {
+    issuanceLocked = true;
+  },
+
+  /**
    * Issue a session token + per-agent call signing key at registration.
-   * Throws if the agent has been persistently revoked.
+   * Throws if the agent has been persistently revoked or issuance is locked.
    */
   issueToken(
     agentId: string,
     riskConfig: AgentRiskConfig,
     ttlMs: number = 24 * 60 * 60 * 1000,
   ): AgentToken {
+    if (issuanceLocked) {
+      throw new Error(
+        `[AgentAuth] Token issuance is locked. issueToken() may only be called at startup before lockIssuance(). ` +
+        `Agent "${agentId}" attempted to register after lock.`
+      );
+    }
+
     if (persistentlyRevokedAgents.has(agentId)) {
       throw new Error(
         `[AgentAuth] Agent "${agentId}" has been persistently revoked and cannot be re-registered. ` +
@@ -437,8 +456,22 @@ export const AgentAuthManager = {
   },
 
   /**
+   * Expire a token on normal agent shutdown WITHOUT persisting a revocation.
+   * The agent can re-register in the same or a future process.
+   * Use this for clean lifecycle stops — use revokeToken() for security incidents.
+   */
+  expireToken(agentId: string): boolean {
+    const stored = tokenRegistry.get(agentId);
+    if (!stored) return false;
+    tokenRegistry.delete(agentId);
+    AuditLogger.log({ agentId, event: 'auth.token_revoked', metadata: { revokedBy: 'agent_stopped', persistent: false } });
+    return true;
+  },
+
+  /**
    * Revoke a token immediately. Persists the revocation to disk so it
    * survives restarts — the agent cannot re-register after revocation.
+   * Use for security incidents: quarantine, emergency stop, compromise.
    */
   revokeToken(agentId: string, revokedBy: string = 'system'): boolean {
     const stored = tokenRegistry.get(agentId);
