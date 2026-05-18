@@ -129,6 +129,8 @@ export class MemoryService {
       type?: MemoryType;
       importance?: number;
       tags?: string[];
+      /** Caller-asserted trust 0-1. Auto-penalized if injection is detected at store time. */
+      trust?: number;
     }
   ): Promise<MemoryEntry> {
     return this.longTerm.store(content, {
@@ -136,6 +138,7 @@ export class MemoryService {
       type: options.type ?? 'fact',
       importance: options.importance,
       tags: options.tags,
+      trust: options.trust,
     });
   }
 

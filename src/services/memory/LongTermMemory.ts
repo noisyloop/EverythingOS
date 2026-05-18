@@ -5,6 +5,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 
 import { eventBus } from '../../core/event-bus/EventBus';
+import { sanitizeInput } from '../../security/sanitize';
 import {
   MemoryAdapter,
   MemoryEntry,
@@ -16,18 +17,43 @@ import {
 } from './MemoryTypes';
 import { InMemoryAdapter } from './adapters/InMemoryAdapter';
 
+// Trust assumed for an entry that carries no explicit trust (incl. legacy
+// entries written before per-entry trust existed). Above the default floor
+// so existing data stays retrievable.
+const DEFAULT_TRUST = 0.5;
+// Trust assigned when store-time injection patterns are detected.
+const INJECTION_TRUST = 0.1;
+// Trust assigned when an entry trips the poisoning-breadth heuristic.
+const POISON_TRUST = 0.05;
+// Only near-exact matches count toward breadth — a keyword-stuffed entry
+// matches many distinct queries near-exactly; a normal entry does not.
+const BREADTH_RELEVANCE_MIN = 0.95;
+
 export interface LongTermMemoryConfig {
   adapter?: MemoryAdapter;
   embedding?: EmbeddingProvider;
   maxEntries?: number;
   pruneThreshold?: number;     // Prune when importance below this
   autoConsolidate?: boolean;   // Merge similar memories
+  /** Entries with trust below this are excluded from retrieval. Default 0.2. */
+  minTrust?: number;
+  /**
+   * If an entry is a near-exact match for more than this many *distinct*
+   * queries, it is treated as keyword-stuffed poisoning, flagged, and
+   * excluded. Default 12. Set 0 to disable the heuristic.
+   */
+  poisonBreadthThreshold?: number;
 }
 
 export class LongTermMemory {
   private adapter: MemoryAdapter;
   private embedding: EmbeddingProvider | null;
   private config: Required<Omit<LongTermMemoryConfig, 'adapter' | 'embedding'>>;
+  // Per-entry set of distinct normalized queries it near-exactly matched.
+  // Bounded: at most MAX_BREADTH_ENTRIES entries, each set capped.
+  private breadthByEntry = new Map<string, Set<string>>();
+  private static readonly MAX_BREADTH_ENTRIES = 5000;
+  private static readonly MAX_BREADTH_QUERIES_PER_ENTRY = 64;
 
   constructor(config: LongTermMemoryConfig = {}) {
     this.adapter = config.adapter ?? new InMemoryAdapter();
@@ -36,6 +62,8 @@ export class LongTermMemory {
       maxEntries: config.maxEntries ?? 10000,
       pruneThreshold: config.pruneThreshold ?? 0.1,
       autoConsolidate: config.autoConsolidate ?? false,
+      minTrust: config.minTrust ?? 0.2,
+      poisonBreadthThreshold: config.poisonBreadthThreshold ?? 12,
     };
   }
 
@@ -52,9 +80,27 @@ export class LongTermMemory {
       tags?: string[];
       associations?: string[];
       ttl?: number;
+      /** Caller-asserted trust 0-1. Defaults to DEFAULT_TRUST. Auto-penalized on injection. */
+      trust?: number;
       metadata?: Record<string, unknown>;
     }
   ): Promise<MemoryEntry> {
+    // Store-time poisoning check. Content that carries injection patterns is
+    // not refused (it may be legitimately quoting an attack) but is written
+    // with low trust and flagged, so retrieval will not surface it.
+    const { injectionDetected } = sanitizeInput(content, `memory-store:${options.source}`);
+    let trust = Math.max(0, Math.min(1, options.trust ?? DEFAULT_TRUST));
+    let flagged = false;
+    if (injectionDetected) {
+      trust = Math.min(trust, INJECTION_TRUST);
+      flagged = true;
+      eventBus.emit('memory:longterm:poisoning_suspected', {
+        source: options.source,
+        type: options.type,
+        reason: 'injection_patterns_at_store',
+      });
+    }
+
     // Generate embedding if provider available
     let embedding: number[] | undefined;
     if (this.embedding) {
@@ -65,7 +111,7 @@ export class LongTermMemory {
         eventBus.emit('memory:longterm:embedding:failed', { error: String(error) });
       }
     }
-    
+
     const entry = await this.adapter.store({
       content,
       embedding,
@@ -76,6 +122,9 @@ export class LongTermMemory {
         tags: options.tags,
         associations: options.associations,
         ...options.metadata,
+        // Security fields last — caller metadata cannot override trust/flag.
+        trust,
+        ...(flagged ? { flagged: true } : {}),
       },
       expiresAt: options.ttl ? Date.now() + options.ttl : undefined,
     });
@@ -130,12 +179,92 @@ export class LongTermMemory {
   }
 
   async search(query: MemoryQuery): Promise<MemoryResult[]> {
-    // If semantic search requested and we have embedding provider
-    if (query.text && this.embedding) {
-      return this.semanticSearch(query.text, query);
+    const wantLimit = query.limit;
+
+    if (query.ignoreTrust) {
+      // Maintenance/stats path — no trust filtering, original semantics.
+      if (query.text && this.embedding) return this.semanticSearch(query.text, query);
+      return this.adapter.search(query);
     }
-    
-    return this.adapter.search(query);
+
+    // Over-fetch so trust filtering / poisoning exclusion can drop entries
+    // without starving a small result set.
+    const expanded: MemoryQuery = wantLimit
+      ? { ...query, limit: Math.max(wantLimit * 5, 50) }
+      : query;
+
+    const ranked =
+      query.text && this.embedding
+        ? await this.semanticSearch(query.text, expanded)
+        : await this.adapter.search(expanded);
+
+    if (query.text) {
+      await this.detectPoisonBreadth(query.text, ranked);
+    }
+
+    const trusted = this.applyTrust(ranked, query);
+    return wantLimit ? trusted.slice(0, wantLimit) : trusted;
+  }
+
+  // Weight relevance by per-entry trust and drop flagged / sub-floor entries.
+  // A poisoned entry that scores high on keyword overlap but carries low
+  // trust now ranks below — or is excluded entirely beneath — legitimate
+  // content of equal lexical relevance.
+  private applyTrust(results: MemoryResult[], query: MemoryQuery): MemoryResult[] {
+    const floor = query.minTrust ?? this.config.minTrust;
+    return results
+      .filter((r) => r.entry.metadata.flagged !== true)
+      .map((r) => {
+        const trust = Math.max(0, Math.min(1, r.entry.metadata.trust ?? DEFAULT_TRUST));
+        return { result: { ...r, relevance: (r.relevance ?? 1) * trust }, trust };
+      })
+      .filter((x) => x.trust >= floor)
+      .map((x) => x.result)
+      .sort((a, b) => (b.relevance ?? 0) - (a.relevance ?? 0));
+  }
+
+  private normalizeQuery(text: string): string {
+    return text.toLowerCase().trim().replace(/\s+/g, ' ').slice(0, 256);
+  }
+
+  // Poisoning heuristic: an entry that is a near-exact match for many
+  // *distinct* queries is keyword-stuffed to match everything. Flag it,
+  // crater its trust, and persist that so it stays excluded.
+  private async detectPoisonBreadth(text: string, ranked: MemoryResult[]): Promise<void> {
+    const threshold = this.config.poisonBreadthThreshold;
+    if (threshold <= 0 || ranked.length < 3) return;
+
+    const top = ranked[0];
+    if ((top.relevance ?? 0) < BREADTH_RELEVANCE_MIN) return;
+    if (top.entry.metadata.flagged === true) return;
+
+    const id = top.entry.id;
+    let set = this.breadthByEntry.get(id);
+    if (!set) {
+      if (this.breadthByEntry.size >= LongTermMemory.MAX_BREADTH_ENTRIES) {
+        // Evict the oldest tracked entry — bounded memory.
+        const oldest = this.breadthByEntry.keys().next().value;
+        if (oldest !== undefined) this.breadthByEntry.delete(oldest);
+      }
+      set = new Set<string>();
+      this.breadthByEntry.set(id, set);
+    }
+    if (set.size < LongTermMemory.MAX_BREADTH_QUERIES_PER_ENTRY) {
+      set.add(this.normalizeQuery(text));
+    }
+
+    if (set.size > threshold) {
+      await this.adapter.update(id, {
+        metadata: { ...top.entry.metadata, flagged: true, trust: POISON_TRUST },
+      });
+      this.breadthByEntry.delete(id);
+      eventBus.emit('memory:longterm:poisoning_detected', {
+        id,
+        source: top.entry.metadata.source,
+        distinctQueries: threshold + 1,
+        reason: 'keyword_breadth',
+      });
+    }
   }
 
   private async semanticSearch(text: string, query: MemoryQuery): Promise<MemoryResult[]> {
