@@ -10,6 +10,7 @@
  */
 
 import { createHash } from 'crypto';
+import { re2Pattern } from './safe-regex';
 
 export interface SanitizedInput {
   sanitized: string;
@@ -49,64 +50,66 @@ function normalizeForDetection(input: string): string {
 // Injection patterns
 // ─────────────────────────────────────────────────────────────────────────────
 
+// STRIDE T-6: compiled with RE2 for guaranteed linear-time matching
 const INJECTION_PATTERNS: Array<{ pattern: RegExp; name: string }> = [
-  { pattern: /ignore\s+(all\s+)?(previous|prior|above)\s+instructions?/gi, name: 'ignore_previous' },
-  { pattern: /disregard\s+(all\s+)?(previous|prior|above)\s+instructions?/gi, name: 'disregard_previous' },
-  { pattern: /forget\s+(all\s+|your\s+)?(previous|prior|above)\s+instructions?/gi, name: 'forget_previous' },
-  { pattern: /you\s+are\s+now\s+(a|an)\s+/gi, name: 'role_override' },
-  { pattern: /act\s+as\s+(a|an)\s+/gi, name: 'act_as' },
-  { pattern: /pretend\s+you\s+(are|were)\s+/gi, name: 'pretend_to_be' },
-  { pattern: /\[system\]/gi, name: 'fake_system_tag' },
-  { pattern: /<\s*system\s*>/gi, name: 'fake_system_xml' },
-  { pattern: /###\s*system/gi, name: 'fake_system_markdown' },
-  { pattern: /new\s+instructions?:/gi, name: 'new_instructions' },
-  { pattern: /override\s+instructions?/gi, name: 'override_instructions' },
-  { pattern: /your\s+(real\s+|true\s+)?instructions?\s+are/gi, name: 'fake_instructions' },
-  { pattern: /print\s+(your\s+)?system\s+prompt/gi, name: 'extract_system_prompt' },
-  { pattern: /reveal\s+(your\s+)?(system\s+prompt|instructions?|prompt)/gi, name: 'reveal_prompt' },
-  { pattern: /do\s+anything\s+now/gi, name: 'dan_jailbreak' },
-  { pattern: /jailbreak/gi, name: 'explicit_jailbreak' },
-  { pattern: /grandma\s+(trick|exploit|hack)/gi, name: 'grandma_trick' },
-  { pattern: /developer\s+mode/gi, name: 'developer_mode' },
+  { pattern: re2Pattern('ignore\\s+(all\\s+)?(previous|prior|above)\\s+instructions?', 'gi'), name: 'ignore_previous' },
+  { pattern: re2Pattern('disregard\\s+(all\\s+)?(previous|prior|above)\\s+instructions?', 'gi'), name: 'disregard_previous' },
+  { pattern: re2Pattern('forget\\s+(all\\s+|your\\s+)?(previous|prior|above)\\s+instructions?', 'gi'), name: 'forget_previous' },
+  { pattern: re2Pattern('you\\s+are\\s+now\\s+(a|an)\\s+', 'gi'), name: 'role_override' },
+  { pattern: re2Pattern('act\\s+as\\s+(a|an)\\s+', 'gi'), name: 'act_as' },
+  { pattern: re2Pattern('pretend\\s+you\\s+(are|were)\\s+', 'gi'), name: 'pretend_to_be' },
+  { pattern: re2Pattern('\\[system\\]', 'gi'), name: 'fake_system_tag' },
+  { pattern: re2Pattern('<\\s*system\\s*>', 'gi'), name: 'fake_system_xml' },
+  { pattern: re2Pattern('###\\s*system', 'gi'), name: 'fake_system_markdown' },
+  { pattern: re2Pattern('new\\s+instructions?:', 'gi'), name: 'new_instructions' },
+  { pattern: re2Pattern('override\\s+instructions?', 'gi'), name: 'override_instructions' },
+  { pattern: re2Pattern('your\\s+(real\\s+|true\\s+)?instructions?\\s+are', 'gi'), name: 'fake_instructions' },
+  { pattern: re2Pattern('print\\s+(your\\s+)?system\\s+prompt', 'gi'), name: 'extract_system_prompt' },
+  { pattern: re2Pattern('reveal\\s+(your\\s+)?(system\\s+prompt|instructions?|prompt)', 'gi'), name: 'reveal_prompt' },
+  { pattern: re2Pattern('do\\s+anything\\s+now', 'gi'), name: 'dan_jailbreak' },
+  { pattern: re2Pattern('jailbreak', 'gi'), name: 'explicit_jailbreak' },
+  { pattern: re2Pattern('grandma\\s+(trick|exploit|hack)', 'gi'), name: 'grandma_trick' },
+  { pattern: re2Pattern('developer\\s+mode', 'gi'), name: 'developer_mode' },
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PII patterns
 // ─────────────────────────────────────────────────────────────────────────────
 
+// STRIDE T-6: compiled with RE2 for guaranteed linear-time matching
 const PII_PATTERNS: Array<{ pattern: RegExp; replacement: string; category: string }> = [
   {
-    pattern: /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g,
+    pattern: re2Pattern('[a-zA-Z0-9._%+\\-]+@[a-zA-Z0-9.\\-]+\\.[a-zA-Z]{2,}', 'g'),
     replacement: '[EMAIL_REDACTED]',
     category: 'email',
   },
   {
-    pattern: /\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13}|3(?:0[0-5]|[68][0-9])[0-9]{11}|6(?:011|5[0-9]{2})[0-9]{12}|(?:2131|1800|35\d{3})\d{11})\b/g,
+    pattern: re2Pattern('(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13}|3(?:0[0-5]|[68][0-9])[0-9]{11}|6(?:011|5[0-9]{2})[0-9]{12}|(?:2131|1800|35[0-9]{3})[0-9]{11})', 'g'),
     replacement: '[CARD_REDACTED]',
     category: 'credit_card',
   },
   {
-    pattern: /\b\d{3}[-\s]\d{2}[-\s]\d{4}\b/g,
+    pattern: re2Pattern('[0-9]{3}[-\\s][0-9]{2}[-\\s][0-9]{4}', 'g'),
     replacement: '[SSN_REDACTED]',
     category: 'ssn',
   },
   {
-    pattern: /(\+?1[-.\s]?)?(\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4})/g,
+    pattern: re2Pattern('(\\+?1[-.\\s]?)?(\\(?[0-9]{3}\\)?[-.\\s]?[0-9]{3}[-.\\s]?[0-9]{4})', 'g'),
     replacement: '[PHONE_REDACTED]',
     category: 'phone',
   },
   {
-    pattern: /\b(?:\d{1,3}\.){3}\d{1,3}\b/g,
+    pattern: re2Pattern('(?:[0-9]{1,3}\\.){3}[0-9]{1,3}', 'g'),
     replacement: '[IP_REDACTED]',
     category: 'ip_address',
   },
   {
-    pattern: /\b(sk-[a-zA-Z0-9]{20,}|Bearer\s+[a-zA-Z0-9\-._~+/]+=*|ghp_[a-zA-Z0-9]{36}|xoxb-[a-zA-Z0-9\-]+)\b/g,
+    pattern: re2Pattern('(sk-[a-zA-Z0-9]{20,}|Bearer\\s+[a-zA-Z0-9\\-._~+/]+=*|ghp_[a-zA-Z0-9]{36}|xoxb-[a-zA-Z0-9\\-]+)', 'g'),
     replacement: '[TOKEN_REDACTED]',
     category: 'api_key',
   },
   {
-    pattern: /\b[A-Z]{1,2}[0-9]{6,9}\b/g,
+    pattern: re2Pattern('[A-Z]{1,2}[0-9]{6,9}', 'g'),
     replacement: '[PASSPORT_REDACTED]',
     category: 'passport',
   },
@@ -197,3 +200,11 @@ export function checkRateLimit(agentId: string, limitPerMinute: number): boolean
 export function resetRateLimit(agentId: string): void {
   rateLimitCounters.delete(agentId);
 }
+
+// STRIDE D-3: purge stale rate limit entries to prevent unbounded memory growth
+setInterval(() => {
+  const cutoff = Date.now() - 2 * 60 * 1000; // older than 2× the 1-minute window
+  for (const [agentId, entry] of rateLimitCounters) {
+    if (entry.windowStart < cutoff) rateLimitCounters.delete(agentId);
+  }
+}, 5 * 60_000).unref();

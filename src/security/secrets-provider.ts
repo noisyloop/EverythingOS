@@ -115,12 +115,28 @@ export class CachedRemoteProvider implements SecretsProvider {
 // ─────────────────────────────────────────────────────────────────────────────
 
 let _provider: SecretsProvider = new EnvSecretsProvider();
+// STRIDE I-2: freeze provider registry after startup
+let _providerLocked = false;
+
+/**
+ * Freeze the secrets provider. Call once at startup after all agents are
+ * registered. Prevents a compromised in-process agent from swapping in a
+ * malicious provider to exfiltrate secrets via getSecret() calls.
+ */
+export function lockSecretsProvider(): void {
+  _providerLocked = true;
+}
 
 /**
  * Replace the process-wide secrets provider.
- * Call at startup before any agents are started or providers are locked.
+ * Call at startup before lockSecretsProvider() — throws after locking.
  */
 export function setSecretsProvider(provider: SecretsProvider): void {
+  if (_providerLocked) {
+    throw new Error(
+      '[SecretsProvider] Provider is locked. setSecretsProvider() must be called at startup, before lockSecretsProvider().'
+    );
+  }
   _provider = provider;
 }
 
