@@ -42,6 +42,7 @@
 
 import { createHash, randomBytes } from 'crypto';
 import { AuditLogger } from './audit-log';
+import { getSecret } from './secrets-provider';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Supported Providers
@@ -168,10 +169,11 @@ function getProviderKeys(provider: Provider): string[] {
 
   const keys: string[] = [];
   for (const varName of envVarNames) {
-    const val = process.env[varName];
+    const val = getSecret(varName);
     if (!val) {
       throw new Error(
-        `[CredentialVault] Provider "${provider}" requires env var ${varName} but it is not set.`
+        `[CredentialVault] Provider "${provider}" requires secret ${varName} but it is not set. ` +
+        `Configure it via SecretsProvider (setSecretsProvider()) or set the environment variable.`
       );
     }
     keys.push(val);

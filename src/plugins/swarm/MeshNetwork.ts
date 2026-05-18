@@ -4,6 +4,7 @@
 // Handles: Discovery, routing, message relay, network topology
 // ═══════════════════════════════════════════════════════════════════════════════
 
+import { createHmac, randomBytes, timingSafeEqual } from 'crypto';
 import { eventBus } from '../../core/event-bus/EventBus';
 import { WebSocketProtocol } from '../hardware/protocols/WebSocketProtocol';
 import { MQTTProtocol } from '../hardware/protocols/MQTTProtocol';
@@ -31,6 +32,14 @@ export interface MeshConfig {
   pingInterval?: number;         // ms
   peerTimeout?: number;          // ms
   maxHops?: number;              // For message relay
+
+  /**
+   * HMAC secret for message authentication. When set, all outbound messages
+   * are signed and inbound messages without a valid signature are dropped.
+   * Use a 32-byte random hex string: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+   * If unset, signing is skipped (development mode only).
+   */
+  meshSecret?: string;
 }
 
 export interface MeshPeer {
@@ -52,6 +61,8 @@ export interface MeshMessage {
   timestamp: number;
   ttl: number;                   // Remaining hops
   path: string[];                // Nodes traversed
+  /** HMAC-SHA256 of "id:from:to:timestamp" — present when meshSecret is configured */
+  hmac?: string;
 }
 
 export type MessageHandler = (message: MeshMessage) => void;
@@ -241,17 +252,44 @@ export class MeshNetwork {
   // Messaging
   // ─────────────────────────────────────────────────────────────────────────
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // Message HMAC authentication (STRIDE R-2: peer injection prevention)
+  // ─────────────────────────────────────────────────────────────────────────
+
+  private signMessage(message: MeshMessage): string {
+    const payload = `${message.id}:${message.from}:${message.to}:${message.timestamp}`;
+    return createHmac('sha256', this.config.meshSecret!).update(payload).digest('hex');
+  }
+
+  private verifyMessage(message: MeshMessage): boolean {
+    if (!this.config.meshSecret) return true; // signing disabled
+    if (!message.hmac) return false;
+    if (message.hmac.length !== 64) return false;
+    const expected = this.signMessage(message);
+    try {
+      return timingSafeEqual(Buffer.from(message.hmac, 'hex'), Buffer.from(expected, 'hex'));
+    } catch {
+      return false;
+    }
+  }
+
   send(to: string, type: string, payload: unknown): string {
+    const ts = Date.now();
+    const id = `${this.config.nodeId}_${++this.messageCounter}_${ts}`;
     const message: MeshMessage = {
-      id: `${this.config.nodeId}_${++this.messageCounter}_${Date.now()}`,
+      id,
       type,
       from: this.config.nodeId,
       to,
       payload,
-      timestamp: Date.now(),
+      timestamp: ts,
       ttl: this.config.maxHops!,
       path: [this.config.nodeId],
     };
+
+    if (this.config.meshSecret) {
+      message.hmac = this.signMessage(message);
+    }
 
     this.routeMessage(message);
     return message.id;
@@ -333,6 +371,12 @@ export class MeshNetwork {
   private receiveMessage(message: MeshMessage): void {
     // Ignore own messages
     if (message.from === this.config.nodeId) return;
+
+    // Verify HMAC before processing — drop forged/tampered messages
+    if (this.config.meshSecret && !this.verifyMessage(message)) {
+      this.log('warn', `Dropped message ${message.id} from ${message.from}: HMAC verification failed`);
+      return;
+    }
 
     // Ignore already seen messages
     if (this.seenMessages.has(message.id)) return;
