@@ -18,6 +18,7 @@ import { AgentRiskTier } from '../../../types/agent-risk';
 import { AgentManifest, validateManifest } from '../../../types/agent-manifest';
 import { sanitizeInput } from '../../../security/sanitize';
 import { AuditLogger } from '../../../security/audit-log';
+import { getSecret } from '../../../security/secrets-provider';
 
 export const MANIFEST: AgentManifest = validateManifest({
   id: 'glasswally',
@@ -217,7 +218,7 @@ export default class GlasswallyAgent extends Agent {
     this.maxAlertsPerMinute = options.maxAlertsPerMinute ?? 60;
     this.fromStart = options.fromStart ?? false;
 
-    const secretStr = options.iocSecret ?? process.env.GLASSWALLY_IOC_SECRET;
+    const secretStr = options.iocSecret ?? getSecret('GLASSWALLY_IOC_SECRET');
     this.iocSecret = secretStr ? Buffer.from(secretStr, 'utf-8') : null;
 
     if (!this.iocSecret) {

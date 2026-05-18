@@ -24,6 +24,15 @@ export interface MemoryMetadata {
   accessCount?: number;
   lastAccessedAt?: number;
   associations?: string[];  // IDs of related memories
+  /**
+   * Trust score 0-1. Retrieval weights relevance by this and excludes
+   * entries below the trust floor. Lowered automatically when store-time
+   * injection patterns are detected or poisoning breadth is suspected.
+   * Absent on legacy entries — treated as the default trust.
+   */
+  trust?: number;
+  /** Set when the entry tripped a poisoning heuristic. Flagged entries are excluded from recall. */
+  flagged?: boolean;
   [key: string]: unknown;
 }
 
@@ -47,6 +56,10 @@ export interface MemoryQuery {
   offset?: number;
   minRelevance?: number;    // 0-1 threshold for semantic search
   includeExpired?: boolean;
+  /** Override the configured trust floor for this query (0-1). */
+  minTrust?: number;
+  /** Bypass trust weighting/filtering — for maintenance/stats paths only. */
+  ignoreTrust?: boolean;
 }
 
 export interface MemoryFilter {

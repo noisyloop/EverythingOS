@@ -44,10 +44,11 @@
  *   // Store hash in DecisionLedger.buildContext() as modelId
  */
 
-import { createHash, createHmac, timingSafeEqual } from 'crypto';
+import { createHash, createHmac, timingSafeEqual, randomInt } from 'crypto';
 import { createReadStream } from 'fs';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { resolve } from 'path';
+import { z } from 'zod';
 import { AuditLogger } from './audit-log';
 import { getSecret } from './secrets-provider';
 import type { LLMRouter, LLMRequest } from '../runtime/LLMRouter';
@@ -89,10 +90,30 @@ const APPROVED_MODELS: Record<string, string[]> = {
 // Behavioral Fingerprint Probes
 // Fixed prompts at temperature 0. Deterministic for a given model.
 // If outputs change, the model changed.
-// Add domain-specific probes relevant to your agents.
+//
+// These built-in probes are in source — an adversary who can read this repo
+// could craft a model that passes exactly them. Two controls mitigate that:
+//
+//   1. OUT-OF-BAND PROBE SET — set MODEL_GUARD_PROBES_FILE to a JSON file
+//      kept outside the repo. Its probes replace the built-ins entirely, so
+//      reading this source tells an adversary nothing about the live probes.
+//
+//   2. RANDOMIZED SUBSET — set MODEL_GUARD_PROBE_COUNT=k to fingerprint with
+//      a cryptographically-random k-probe subset of the pool. The selection
+//      is pinned into the baseline so drift detection stays apples-to-apples,
+//      but which probes are live is not predictable from the source.
+//
+// Both default off, so existing baselines (full pool, declared order) stay
+// valid with no migration.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const FINGERPRINT_PROBES = [
+export interface FingerprintProbe {
+  id: string;
+  prompt: string;
+  expectedPattern: RegExp;
+}
+
+const BUILTIN_FINGERPRINT_PROBES: FingerprintProbe[] = [
   {
     id: 'math-basic',
     prompt: 'What is 2 + 2? Reply with only the number.',
@@ -122,6 +143,93 @@ const FINGERPRINT_PROBES = [
   },
 ];
 
+// Out-of-band probe file: trusted operator-supplied deployment config (not
+// adversary input). A probe whose `expected` regex source exceeds this is
+// rejected — guards against an accidentally pathological operator pattern.
+const MAX_PROBE_PATTERN_LENGTH = 2_000;
+
+const ProbeFileSchema = z
+  .array(
+    z.object({
+      id: z.string().min(1).max(128),
+      prompt: z.string().min(1).max(8_192),
+      expected: z.string().min(1).max(MAX_PROBE_PATTERN_LENGTH),
+      flags: z
+        .string()
+        .max(8)
+        .regex(/^[gimsuy]*$/)
+        .optional(),
+    }),
+  )
+  .min(1)
+  .max(100);
+
+/**
+ * Resolve the active probe pool. If MODEL_GUARD_PROBES_FILE is set, its
+ * contents replace the built-in probes entirely. The file is a security
+ * control: a malformed file fails closed in production rather than silently
+ * degrading to the (publicly known) built-in probes.
+ */
+function loadProbePool(): FingerprintProbe[] {
+  const file = process.env.MODEL_GUARD_PROBES_FILE;
+  if (!file) return BUILTIN_FINGERPRINT_PROBES;
+
+  try {
+    const raw = JSON.parse(readFileSync(resolve(file), 'utf8'));
+    const parsed = ProbeFileSchema.parse(raw);
+
+    const ids = new Set<string>();
+    const pool = parsed.map((p) => {
+      if (ids.has(p.id)) {
+        throw new Error(`duplicate probe id "${p.id}"`);
+      }
+      ids.add(p.id);
+      return {
+        id: p.id,
+        prompt: p.prompt,
+        expectedPattern: new RegExp(p.expected, p.flags),
+      };
+    });
+
+    AuditLogger.log({
+      agentId: 'model-guard',
+      event: 'agent.started',
+      metadata: { action: 'out_of_band_probes_loaded', count: pool.length },
+    });
+    return pool;
+  } catch (err) {
+    const detail = `MODEL_GUARD_PROBES_FILE could not be loaded: ${String(err)}`;
+    if (process.env.NODE_ENV === 'production') {
+      // Fail closed — never fall back to publicly-known probes in production.
+      throw new Error(`[ModelGuard] ${detail}`);
+    }
+    console.warn(`[ModelGuard] ${detail} — falling back to built-in probes (dev only).`);
+    return BUILTIN_FINGERPRINT_PROBES;
+  }
+}
+
+/**
+ * Cryptographically-random k-of-n probe selection (Fisher–Yates with
+ * crypto.randomInt). Returns probe ids in the shuffled draw order — order is
+ * part of the fingerprint, so a pinned selection reproduces the same hash.
+ */
+function randomProbeSelection(pool: FingerprintProbe[], count: number): string[] {
+  const ids = pool.map((p) => p.id);
+  for (let i = ids.length - 1; i > 0; i--) {
+    const j = randomInt(0, i + 1);
+    [ids[i], ids[j]] = [ids[j], ids[i]];
+  }
+  return ids.slice(0, Math.max(1, Math.min(count, ids.length)));
+}
+
+/** Resolve the probe count from MODEL_GUARD_PROBE_COUNT, or null for full pool. */
+function configuredProbeCount(): number | null {
+  const raw = process.env.MODEL_GUARD_PROBE_COUNT;
+  if (!raw) return null;
+  const n = Number.parseInt(raw, 10);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
@@ -140,6 +248,8 @@ export interface FingerprintResult {
   fingerprintHash: string;
   /** true if all probes matched expected patterns */
   allProbesPassed: boolean;
+  /** Probe ids, in the order used — pinned into the baseline for stable drift checks */
+  probeSelection: string[];
 }
 
 export interface FingerprintRecord {
@@ -151,6 +261,13 @@ export interface FingerprintRecord {
   lastCheckedTimestamp: string;
   driftDetected: boolean;
   history: Array<{ hash: string; timestamp: string }>;
+  /**
+   * Probe ids (ordered) this baseline was established with. Pinned so every
+   * subsequent check uses the identical probe set — otherwise the hash would
+   * differ for benign reasons. Absent on pre-randomization baselines, which
+   * are treated as "full built-in pool, declared order" for back-compat.
+   */
+  probeSelection?: string[];
 }
 
 export interface ModelGuardViolation {
@@ -428,9 +545,45 @@ export const ModelGuard = {
     const targetModel = modelId ?? approved[0];
     ModelGuard.assertApproved(provider, targetModel);
 
+    const pool = loadProbePool();
+    const poolById = new Map(pool.map((p) => [p.id, p]));
+
+    // Pin the probe set to the baseline so drift checks compare like with
+    // like. Precedence: existing baseline's recorded selection → configured
+    // random subset (new baselines only) → full pool in declared order.
+    const existingRecord = loadFingerprintIndex()[`${provider}:${targetModel}`];
+    let selection: string[];
+    if (existingRecord?.probeSelection?.length) {
+      selection = existingRecord.probeSelection;
+    } else if (existingRecord) {
+      // Pre-randomization baseline — it was computed over the full pool in
+      // declared order. Reproduce that exactly for back-compat.
+      selection = pool.map((p) => p.id);
+    } else {
+      const count = configuredProbeCount();
+      selection =
+        count !== null && count < pool.length
+          ? randomProbeSelection(pool, count)
+          : pool.map((p) => p.id);
+    }
+
+    // A pinned/expected probe id missing from the pool means the probe set
+    // changed under an existing baseline — fail closed rather than emit a
+    // silently-incomparable fingerprint.
+    const missing = selection.filter((id) => !poolById.has(id));
+    if (missing.length) {
+      throw new Error(
+        `[ModelGuard] Baseline for ${provider}:${targetModel} pins probe(s) ` +
+          `[${missing.join(', ')}] absent from the active pool. The probe set ` +
+          `changed — reset the baseline (delete its fingerprints.json entry) ` +
+          `or restore the original MODEL_GUARD_PROBES_FILE.`,
+      );
+    }
+
     const probeResults: FingerprintResult['probeResults'] = [];
 
-    for (const probe of FINGERPRINT_PROBES) {
+    for (const id of selection) {
+      const probe = poolById.get(id)!;
       let response = '';
       try {
         const result = await router.complete({
@@ -480,6 +633,7 @@ export const ModelGuard = {
       probeResults,
       fingerprintHash,
       allProbesPassed,
+      probeSelection: selection,
     };
   },
 
@@ -507,6 +661,7 @@ export const ModelGuard = {
         lastCheckedTimestamp: result.timestamp,
         driftDetected: false,
         history: [{ hash: result.fingerprintHash, timestamp: result.timestamp }],
+        probeSelection: result.probeSelection,
       };
       saveFingerprintIndex(index);
       console.info(`[ModelGuard] Baseline fingerprint established for ${key}: ${result.fingerprintHash.slice(0, 12)}…`);
@@ -525,6 +680,9 @@ export const ModelGuard = {
         ...existing.history.slice(-49), // keep last 50
         { hash: result.fingerprintHash, timestamp: result.timestamp },
       ],
+      // Backfill the pin on legacy baselines so the probe set is explicit
+      // from here on. Never overwrite an existing pin.
+      probeSelection: existing.probeSelection ?? result.probeSelection,
     };
 
     saveFingerprintIndex(index);
