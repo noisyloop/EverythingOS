@@ -4,6 +4,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 
 import { eventBus } from '../../core/event-bus/EventBus';
+import { getSecret } from '../../security/secrets-provider';
 import {
   DiscordSecurityLayer,
   SecurityConfig,
@@ -329,7 +330,7 @@ export class DiscordBot {
   }
 
   private async callAnthropic(userMessage: string): Promise<string> {
-    const apiKey = this.config.llm.apiKey || process.env.ANTHROPIC_API_KEY;
+    const apiKey = this.config.llm.apiKey || getSecret('ANTHROPIC_API_KEY');
     if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set');
 
     const model = this.config.llm.model || 'claude-sonnet-4-20250514';
@@ -358,7 +359,7 @@ export class DiscordBot {
   }
 
   private async callOpenAI(userMessage: string): Promise<string> {
-    const apiKey = this.config.llm.apiKey || process.env.OPENAI_API_KEY;
+    const apiKey = this.config.llm.apiKey || getSecret('OPENAI_API_KEY');
     if (!apiKey) throw new Error('OPENAI_API_KEY not set');
 
     const model = this.config.llm.model || 'gpt-4o';
@@ -388,7 +389,7 @@ export class DiscordBot {
   }
 
   private async callGoogle(userMessage: string): Promise<string> {
-    const apiKey = this.config.llm.apiKey || process.env.GOOGLE_API_KEY;
+    const apiKey = this.config.llm.apiKey || getSecret('GOOGLE_API_KEY');
     if (!apiKey) throw new Error('GOOGLE_API_KEY not set');
 
     const model = this.config.llm.model || 'gemini-pro';

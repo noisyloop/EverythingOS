@@ -3,6 +3,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 
 import type { LLMProvider, LLMRequest, LLMResponse, LLMMessage } from '../LLMRouter';
+import { getSecret } from '../../security/secrets-provider';
 
 export class ClaudeProvider implements LLMProvider {
   readonly name = 'claude';
@@ -10,7 +11,7 @@ export class ClaudeProvider implements LLMProvider {
   private baseUrl = 'https://api.anthropic.com/v1';
 
   constructor(apiKey?: string) {
-    this.apiKey = apiKey || process.env.ANTHROPIC_API_KEY;
+    this.apiKey = apiKey || getSecret('ANTHROPIC_API_KEY');
   }
 
   async complete(request: Omit<LLMRequest, 'provider'>): Promise<LLMResponse> {

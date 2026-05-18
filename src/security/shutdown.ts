@@ -22,7 +22,7 @@ import { flushAuditLog } from './audit-log';
 import { flushDecisionLedger } from './decision-ledger';
 import { AgentAuthManager } from './agent-auth';
 import { ModelGuard } from './model-guard';
-import { lockSecretsProvider } from './secrets-provider';
+import { lockSecretsProvider, sealSecrets } from './secrets-provider';
 import { AuditLogger } from './audit-log';
 
 /**
@@ -37,6 +37,10 @@ import { AuditLogger } from './audit-log';
  * SupervisorAgent.start() handles STRIDE E-3 (policy store lock) independently.
  */
 export function finalizeStartup(): void {
+  // Seal credentials out of process.env BEFORE locking the provider
+  // (prod-gated). After this, in-process code/plugins cannot read raw keys
+  // via process.env — only the gated getSecret()/requireSecret() resolve them.
+  const seal = sealSecrets();
   lockSecretsProvider();
   AgentAuthManager.lockIssuance();
   ModelGuard.lockModels();
@@ -46,6 +50,7 @@ export function finalizeStartup(): void {
     metadata: {
       action: 'startup_finalized',
       locks: ['secrets_provider', 'token_issuance', 'model_allowlist'],
+      secretsSealed: seal.enabled ? seal.sealed.length : 0,
     },
   });
 }

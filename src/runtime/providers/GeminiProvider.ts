@@ -3,6 +3,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 
 import type { LLMProvider, LLMRequest, LLMResponse } from '../LLMRouter';
+import { getSecret } from '../../security/secrets-provider';
 
 export class GeminiProvider implements LLMProvider {
   readonly name = 'gemini';
@@ -10,7 +11,7 @@ export class GeminiProvider implements LLMProvider {
   private baseUrl = 'https://generativelanguage.googleapis.com/v1beta';
 
   constructor(apiKey?: string) {
-    this.apiKey = apiKey || process.env.GOOGLE_API_KEY;
+    this.apiKey = apiKey || getSecret('GOOGLE_API_KEY');
   }
 
   async complete(request: Omit<LLMRequest, 'provider'>): Promise<LLMResponse> {

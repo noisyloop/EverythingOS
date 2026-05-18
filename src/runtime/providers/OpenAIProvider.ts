@@ -3,6 +3,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 
 import type { LLMProvider, LLMRequest, LLMResponse } from '../LLMRouter';
+import { getSecret } from '../../security/secrets-provider';
 
 export class OpenAIProvider implements LLMProvider {
   readonly name = 'openai';
@@ -10,7 +11,7 @@ export class OpenAIProvider implements LLMProvider {
   private baseUrl = 'https://api.openai.com/v1';
 
   constructor(apiKey?: string) {
-    this.apiKey = apiKey || process.env.OPENAI_API_KEY;
+    this.apiKey = apiKey || getSecret('OPENAI_API_KEY');
   }
 
   async complete(request: Omit<LLMRequest, 'provider'>): Promise<LLMResponse> {
