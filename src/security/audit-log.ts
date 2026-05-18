@@ -52,6 +52,7 @@ export type AuditEventType =
   | 'safety.emergency_stop'
   | 'incident.detected'
   | 'security.glasswally_rate_limited'
+  | 'security.glasswally_line_buffer_overflow'
   | 'security.ioc_bundle_tampered';
 
 export interface AuditEntry {

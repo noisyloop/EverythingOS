@@ -108,6 +108,14 @@ const MAX_BYTES_PER_TICK = 1024 * 1024; // 1 MB
 // Maximum JSONL line size accepted — well below Glasswally's 4 MB internal limit
 const MAX_LINE_BYTES = 65_536; // 64 KB
 
+// Maximum bytes the partial-line buffer may hold between ticks. A single
+// physical line larger than this can never be a valid record (records are
+// capped at MAX_LINE_BYTES), so it is treated as unrecoverable. Without this
+// cap a Glasswally write that never emits a newline — a truncated mid-entry
+// write, or a compromised Glasswally — grows lineBuffer by up to
+// MAX_BYTES_PER_TICK every tick, unbounded, exhausting memory. (STRIDE D-6)
+const MAX_LINE_BUFFER = 1024 * 1024; // 1 MB
+
 // Maximum IOC bundle file size
 const MAX_BUNDLE_BYTES = 50 * 1024 * 1024; // 50 MB
 
@@ -150,6 +158,9 @@ export default class GlasswallyAgent extends Agent {
   // File tailing state
   private enforcementOffset = 0;
   private lineBuffer = ''; // accumulates partial lines between reads
+  // When an oversized physical line is discarded, bytes are dropped until the
+  // next newline so parsing resumes cleanly at the following record.
+  private skipOversizedLine = false;
 
   // Per-minute rate limiting for alert ingestion
   private alertCount = 0;
@@ -528,6 +539,7 @@ export default class GlasswallyAgent extends Agent {
     if (currentSize < offset) {
       this.log('info', `File rotation detected, resetting offset: ${filePath}`);
       this.lineBuffer = '';
+      this.skipOversizedLine = false;
       offset = 0;
     }
 
@@ -546,12 +558,47 @@ export default class GlasswallyAgent extends Agent {
 
     if (bytesRead === 0) return { lines: [], newOffset: offset };
 
-    // Prepend any partial line held from the previous tick
-    const text = this.lineBuffer + buf.subarray(0, bytesRead).toString('utf-8');
+    const chunk = buf.subarray(0, bytesRead).toString('utf-8');
+
+    let text: string;
+    if (this.skipOversizedLine) {
+      // Discarding the tail of an oversized physical line. Drop everything up
+      // to and including the next newline, then resume parsing after it.
+      const nl = chunk.indexOf('\n');
+      if (nl === -1) {
+        // Still inside the oversized line — discard this entire chunk.
+        return { lines: [], newOffset: offset + bytesRead };
+      }
+      this.skipOversizedLine = false;
+      text = chunk.slice(nl + 1);
+    } else {
+      // Prepend any partial line held from the previous tick
+      text = this.lineBuffer + chunk;
+    }
+
     const parts = text.split('\n');
 
     // The last segment may be an incomplete line — hold it for the next tick
     this.lineBuffer = parts.pop() ?? '';
+
+    // Cap the partial-line buffer. A line larger than MAX_LINE_BUFFER can
+    // never be a valid record (records are capped at MAX_LINE_BYTES), so the
+    // remainder of this physical line is unrecoverable: discard the buffer and
+    // skip bytes until the next newline. Complete lines parsed above are
+    // unaffected — only the oversized trailing fragment is dropped. (STRIDE D-6)
+    if (this.lineBuffer.length > MAX_LINE_BUFFER) {
+      this.log('warn', 'Glasswally partial-line buffer exceeded cap — line discarded as unrecoverable', {
+        size: this.lineBuffer.length,
+        cap: MAX_LINE_BUFFER,
+      });
+      AuditLogger.log({
+        agentId: this.id,
+        event: 'security.glasswally_line_buffer_overflow',
+        metadata: { size: this.lineBuffer.length, cap: MAX_LINE_BUFFER },
+      });
+      this.lineBuffer = '';
+      this.skipOversizedLine = true;
+    }
 
     const lines = parts.filter((l) => l.trim().length > 0);
     return { lines, newOffset: offset + bytesRead };
