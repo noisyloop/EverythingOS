@@ -26,7 +26,7 @@
 | T-1 | Tampering | MEDIUM | ✅ Ph2 | `audit-log.ts` | Log file truncation/replacement undetected at startup |
 | T-2 | Tampering | HIGH | ⚠️ Ph3 | `model-guard.ts` | Key falls back to `EOS_AGENT_SECRET` (and a hardcoded dev key) when `MODEL_GUARD_SIGN_KEY` is unset — not cryptographically separate unless explicitly configured |
 | T-3 | Tampering | HIGH | ✅ Ph1 | `agent-auth.ts` | Revocation log has no hash chain; entries can be deleted or corrupted |
-| T-4 | Tampering | MEDIUM | ❌ | `decision-ledger.ts` | NOT IMPLEMENTED: only a per-entry `entryHash` exists — no `previousHash`, no `verifyChain`. Entry deletion/reordering is undetectable. Phase-1 "decision ledger hash chain" was aspirational |
+| T-4 | Tampering | MEDIUM | ✅ 2026-05-18 | `decision-ledger.ts` | Was aspirational (per-entry hash only). NOW FIXED: every entry carries `previousHash`, chained from `GENESIS`; streaming `verifyChain()` fails closed on content tamper, deletion, or reordering. Legacy pre-chain entries stay verifiable |
 | T-5 | Tampering | MEDIUM | ✅ 2026-05-18 | `plugin-sandbox.ts` | Was a gap (raw `resolve(msg.result)`). NOW FIXED: every string in a plugin result passes the injection pipeline via bounded recursive `sanitizePluginResult()` |
 | T-6 | Tampering | LOW | ✅ Ph4 | `sanitize.ts` / `content-filter.ts` | V8 backtracking regex; rewritten with RE2 (linear time) |
 | R-1 | Repudiation | HIGH | ✅ Ph2 | `ApprovalGateAgent.ts` | `approvedBy` is a free-form string; no cryptographic identity binding |
@@ -596,7 +596,7 @@ The following controls are implemented and working. This section provides contex
 > Summary table above is now authoritative**. Corrections:
 >
 > - **E-2** (Phase 2 "HIGH-tier agents in dedicated worker_thread") — ❌ **not implemented.** `IsolatedAgentRunner` exists but is never wired; all agents run in-process.
-> - **T-4** (Phase 1 "decision ledger hash chain") — ❌ **not implemented.** Only a per-entry hash; no cross-entry chain.
+> - **T-4** (Phase 1 "decision ledger hash chain") — was a gap (per-entry hash only); **now genuinely fixed 2026-05-18** (cross-entry `previousHash` chain + streaming `verifyChain()`).
 > - **S-3** (Phase 1 "ModelGuard caller gate") — ⚠️ overstated; no caller authentication, only the post-startup lock.
 > - **S-1** (table-marked Phase 1) — ⚠️ external replay only; never actually in a phase.
 > - **T-2** (Phase 3 "key separate from EOS_AGENT_SECRET") — ⚠️ falls back to `EOS_AGENT_SECRET` unless explicitly configured.

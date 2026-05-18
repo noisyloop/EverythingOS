@@ -19,6 +19,7 @@
     "audit:fix": "npm audit fix",
     "lint": "eslint src/ --ext .ts",
     "typecheck": "tsc --noEmit",
+    "check:stride": "node scripts/check-stride-claims.mjs",
     "sbom": "cyclonedx-npm --output-format json --output-file sbom.json",
     "compliance": "curl -s http://localhost:3000/api/compliance/status | jq ."
   },
