@@ -46,16 +46,31 @@ export interface PolicyContext {
 
 export class PolicyEngine {
   private policies: Map<string, Policy> = new Map();
+  private locked = false;
 
   // ─────────────────────────────────────────────────────────────────────────────
   // Policy Management
   // ─────────────────────────────────────────────────────────────────────────────
 
+  /**
+   * Lock the policy store. Call once at startup after all policies are loaded.
+   * Prevents runtime policy injection by compromised in-process agents.
+   */
+  lock(): void {
+    this.locked = true;
+  }
+
   addPolicy(policy: Policy): void {
+    if (this.locked) {
+      throw new Error(`[PolicyEngine] Policy store is locked. addPolicy() must be called at startup, before lock().`);
+    }
     this.policies.set(policy.id, policy);
   }
 
   removePolicy(policyId: string): boolean {
+    if (this.locked) {
+      throw new Error(`[PolicyEngine] Policy store is locked. removePolicy() must be called at startup, before lock().`);
+    }
     return this.policies.delete(policyId);
   }
 

@@ -57,6 +57,9 @@ import type { LLMRouter, LLMRequest } from '../runtime/LLMRouter';
 // Format: provider → array of approved model IDs.
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Locked after startup — prevents runtime model approval by compromised agents
+let modelsLocked = false;
+
 const APPROVED_MODELS: Record<string, string[]> = {
   anthropic: [
     'claude-sonnet-4-20250514',
@@ -298,10 +301,29 @@ export const ModelGuard = {
   },
 
   /**
-   * Add a model to the approved list at runtime.
-   * Use for dynamically approved models — still logs to audit trail.
+   * Lock the model allowlist. Call once at startup after all models are registered.
+   * Prevents runtime model approval by compromised in-process agents.
+   */
+  lockModels(): void {
+    modelsLocked = true;
+  },
+
+  /**
+   * Add a model to the approved list.
+   * Must be called at startup before lockModels() — throws after locking.
    */
   approve(provider: string, modelId: string, approvedBy: string): void {
+    if (modelsLocked) {
+      const violation: ModelGuardViolation = {
+        type: 'unapproved_model',
+        provider,
+        modelId,
+        detail: `Runtime model approval rejected — allowlist is locked. Update APPROVED_MODELS in model-guard.ts and redeploy.`,
+        timestamp: new Date().toISOString(),
+      };
+      logViolation(violation);
+      throw new Error(`[ModelGuard] ${violation.detail}`);
+    }
     const key = provider.toLowerCase();
     if (!APPROVED_MODELS[key]) APPROVED_MODELS[key] = [];
     if (!APPROVED_MODELS[key].includes(modelId)) {

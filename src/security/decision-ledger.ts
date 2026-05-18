@@ -42,7 +42,7 @@
  */
 
 import { createHash } from 'crypto';
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'fs';
+import { createWriteStream, existsSync, readFileSync, writeFileSync, WriteStream } from 'fs';
 import { resolve } from 'path';
 import { AuditLogger, hashContent } from './audit-log';
 
@@ -161,6 +161,33 @@ const INDEX_LIMIT = 50_000;
 const ledgerIndex = new Map<string, LedgerEntry>();
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Async write stream — non-blocking disk I/O (mirrors audit-log.ts pattern)
+// ─────────────────────────────────────────────────────────────────────────────
+
+let ledgerStream: WriteStream | null = null;
+
+function getLedgerStream(): WriteStream {
+  if (!ledgerStream || ledgerStream.destroyed) {
+    ledgerStream = createWriteStream(LEDGER_FILE_PATH, { flags: 'a', encoding: 'utf8' });
+    ledgerStream.on('error', (err) => {
+      console.error('[DecisionLedger] Write stream error:', err);
+    });
+  }
+  return ledgerStream;
+}
+
+export function flushDecisionLedger(): Promise<void> {
+  return new Promise((res) => {
+    if (!ledgerStream || ledgerStream.destroyed) { res(); return; }
+    ledgerStream.end(() => { ledgerStream = null; res(); });
+  });
+}
+
+process.once('exit', () => { if (ledgerStream && !ledgerStream.destroyed) ledgerStream.end(); });
+process.once('SIGINT', async () => { await flushDecisionLedger(); });
+process.once('SIGTERM', async () => { await flushDecisionLedger(); });
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -187,12 +214,10 @@ function computeEntryHash(entry: Omit<LedgerEntry, 'entryHash'>): string {
 }
 
 function persist(entry: LedgerEntry): void {
-  try {
-    appendFileSync(LEDGER_FILE_PATH, JSON.stringify(entry) + '\n', { encoding: 'utf8' });
-  } catch (err) {
-    // Never crash the agent on ledger write failure
-    console.error('[DecisionLedger] Failed to write entry to disk:', err);
-  }
+  const stream = getLedgerStream();
+  stream.write(JSON.stringify(entry) + '\n', (err) => {
+    if (err) console.error('[DecisionLedger] Failed to write entry seq=' + entry.ledgerId.slice(0, 8) + ':', err);
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
