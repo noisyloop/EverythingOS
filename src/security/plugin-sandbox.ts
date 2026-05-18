@@ -29,6 +29,48 @@
 import { Worker, isMainThread, parentPort, workerData } from 'worker_threads';
 import { resolve } from 'path';
 import { AuditLogger } from './audit-log';
+import { sanitizeInput } from './sanitize';
+
+// STRIDE T-5: a plugin runs untrusted third-party code. Its return value can
+// carry prompt-injection / adversarial content that would otherwise flow
+// straight into agent prompts. Every string in a plugin result is passed
+// through the injection-detection pipeline before it leaves the sandbox.
+// Bounds prevent a hostile plugin from returning a pathological structure.
+const MAX_RESULT_DEPTH = 8;
+const MAX_RESULT_NODES = 10_000;
+
+export function sanitizePluginResult(
+  value: unknown,
+  agentId: string,
+): { value: unknown; injectionDetected: boolean } {
+  let injectionDetected = false;
+  let nodes = 0;
+
+  const walk = (v: unknown, depth: number): unknown => {
+    if (++nodes > MAX_RESULT_NODES || depth > MAX_RESULT_DEPTH) {
+      return '[plugin result truncated: exceeded sanitization bounds]';
+    }
+    if (typeof v === 'string') {
+      const r = sanitizeInput(v, `plugin:${agentId}`);
+      if (r.injectionDetected) injectionDetected = true;
+      return r.sanitized;
+    }
+    if (Array.isArray(v)) {
+      return v.slice(0, MAX_RESULT_NODES).map((x) => walk(x, depth + 1));
+    }
+    if (v !== null && typeof v === 'object') {
+      const out: Record<string, unknown> = {};
+      for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+        out[k] = walk(val, depth + 1);
+      }
+      return out;
+    }
+    // number | boolean | null | undefined — structured-clone safe primitives
+    return v;
+  };
+
+  return { value: walk(value, 0), injectionDetected };
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Config validation — reject credential-shaped values (STRIDE I-4)
@@ -161,7 +203,21 @@ export class PluginSandbox {
           this.pendingCalls.delete(msg.callId);
 
           if (msg.type === 'result') {
-            pending.resolve(msg.result);
+            const { value, injectionDetected } = sanitizePluginResult(
+              msg.result,
+              this.options.agentId,
+            );
+            if (injectionDetected) {
+              AuditLogger.log({
+                agentId: this.options.agentId,
+                event: 'security.injection_detected',
+                metadata: {
+                  action: 'plugin_return_sanitized',
+                  path: this.pluginPath,
+                },
+              });
+            }
+            pending.resolve(value);
           } else {
             pending.reject(new Error(msg.error));
           }
