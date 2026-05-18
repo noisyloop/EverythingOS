@@ -252,34 +252,25 @@ async function route(
     return { status: 200, data: [] };
   }
 
-  if (path.startsWith('/api/approvals/') && path.endsWith('/approve') && method === 'POST') {
-    const approvalId = path.split('/')[3];
-    const { approvedBy, reason } = body as { approvedBy?: string; reason?: string };
-    
-    eventBus.emit('approval:decision', {
-      approvalId,
-      approved: true,
-      approvedBy: approvedBy || 'api',
-      reason,
-      timestamp: Date.now(),
-    });
-    
-    return { status: 200, data: { success: true, approvalId, action: 'approved' } };
-  }
-
-  if (path.startsWith('/api/approvals/') && path.endsWith('/deny') && method === 'POST') {
-    const approvalId = path.split('/')[3];
-    const { deniedBy, reason } = body as { deniedBy?: string; reason?: string };
-    
-    eventBus.emit('approval:decision', {
-      approvalId,
-      approved: false,
-      approvedBy: deniedBy || 'api',
-      reason: reason || 'Denied via API',
-      timestamp: Date.now(),
-    });
-    
-    return { status: 200, data: { success: true, approvalId, action: 'denied' } };
+  // STRIDE S-2: the former POST /api/approvals/:id/{approve,deny} endpoints
+  // emitted an `approval:decision` event that no agent consumes —
+  // ApprovalGateAgent deliberately does NOT subscribe to that channel
+  // (intake is the authenticated out-of-band submitDecision()). The
+  // endpoints were dead code and a re-introduction footgun for an
+  // unauthenticated EventBus approval path. Removed. Approvals must go
+  // through the authenticated channel, not HTTP.
+  if (
+    path.startsWith('/api/approvals/') &&
+    (path.endsWith('/approve') || path.endsWith('/deny')) &&
+    method === 'POST'
+  ) {
+    return {
+      status: 410,
+      data: {
+        error:
+          'Approval decisions are not accepted over HTTP. Use the authenticated out-of-band approval channel (ApprovalGateAgent.submitDecision).',
+      },
+    };
   }
 
   // Decisions (Explainability)
@@ -398,8 +389,6 @@ export function startServer(port = PORT): void {
     console.log('  POST /api/events                  - Emit event');
     console.log('  GET  /api/state                   - Get world state');
     console.log('  GET  /api/approvals               - List pending approvals');
-    console.log('  POST /api/approvals/:id/approve   - Approve request');
-    console.log('  POST /api/approvals/:id/deny      - Deny request');
     console.log('  GET  /api/decisions               - List decisions');
     console.log('  GET  /api/decisions/stats         - Decision statistics');
     console.log('  GET  /api/decisions/:id           - Get decision record');
