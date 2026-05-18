@@ -210,10 +210,10 @@ function cleanupAll(): void {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('EverythingOS — End-to-End Integration', () => {
-  beforeAll(() => {
+  beforeAll(async () => {
     const fs = require('fs');
     try { fs.unlinkSync('./everythingos-audit.jsonl'); } catch {}
-    AuditLogger.initialize();
+    await AuditLogger.initialize();
     DecisionLedger.initialize();
     QuarantineManager.initialize({
       stopAgent: async (id) => {
@@ -369,7 +369,7 @@ describe('EverythingOS — End-to-End Integration', () => {
 
   test('11. Audit chain is valid after all test activity', async () => {
     await flushAuditLog();
-    const result = AuditLogger.verifyChain();
+    const result = await AuditLogger.verifyChain();
     expect(result.valid).toBe(true);
     expect(result.totalEntries).toBeGreaterThan(0);
   });

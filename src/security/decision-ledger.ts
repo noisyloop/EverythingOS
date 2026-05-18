@@ -42,7 +42,8 @@
  */
 
 import { createHash } from 'crypto';
-import { createWriteStream, existsSync, readFileSync, writeFileSync, WriteStream } from 'fs';
+import { createInterface } from 'readline';
+import { createReadStream, createWriteStream, existsSync, readFileSync, writeFileSync, WriteStream } from 'fs';
 import { resolve } from 'path';
 import { AuditLogger, hashContent } from './audit-log';
 
@@ -395,24 +396,28 @@ export const DecisionLedger = {
   },
 
   /**
-   * Full disk scan — use for historical analysis or audit exports.
+   * Full disk scan — streams the file to avoid loading large ledgers into memory (STRIDE D-4).
+   * Use for historical analysis or audit exports.
    */
-  queryDisk(filter: {
+  async queryDisk(filter: {
     agentId?: string;
     decisionType?: DecisionType;
     since?: number;
     until?: number;
     limit?: number;
-  }): LedgerEntry[] {
+  }): Promise<LedgerEntry[]> {
     if (!existsSync(LEDGER_FILE_PATH)) return [];
-
-    const lines = readFileSync(LEDGER_FILE_PATH, 'utf8')
-      .split('\n')
-      .filter((l) => l.trim().length > 0);
 
     const results: LedgerEntry[] = [];
 
-    for (const line of lines) {
+    const rl = createInterface({
+      input: createReadStream(LEDGER_FILE_PATH, { encoding: 'utf8' }),
+      crlfDelay: Infinity,
+    });
+
+    for await (const rawLine of rl) {
+      const line = rawLine.trim();
+      if (!line) continue;
       try {
         const entry = JSON.parse(line) as LedgerEntry;
         if (filter.agentId && entry.agentId !== filter.agentId) continue;

@@ -31,6 +31,36 @@ import { resolve } from 'path';
 import { AuditLogger } from './audit-log';
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Config validation — reject credential-shaped values (STRIDE I-4)
+// Prevents plugins from being used as exfiltration vectors via their config.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const CREDENTIAL_KEY_RE = /^(api[_-]?key|api[_-]?secret|secret[_-]?key|password|passwd|private[_-]?key|access[_-]?token|auth[_-]?token|bearer[_-]?token|credentials?)$/i;
+const CREDENTIAL_VAL_RE = /^(sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{36}|ghs_[A-Za-z0-9]{36}|AKIA[0-9A-Z]{16}|[0-9a-f]{40,}|eyJ[A-Za-z0-9+/]{20,}={0,2})$/;
+
+function validateConfig(obj: Record<string, unknown>, path = 'config'): void {
+  for (const [key, val] of Object.entries(obj)) {
+    const fullPath = `${path}.${key}`;
+    if (typeof val === 'string') {
+      if (CREDENTIAL_KEY_RE.test(key) && val.length > 8) {
+        throw new Error(
+          `[PluginSandbox] Config rejected: "${fullPath}" appears to hold a credential. ` +
+          `Inject secrets via SecretsProvider at runtime, not plugin config.`
+        );
+      }
+      if (CREDENTIAL_VAL_RE.test(val)) {
+        throw new Error(
+          `[PluginSandbox] Config rejected: value at "${fullPath}" matches a known credential pattern. ` +
+          `Inject secrets via SecretsProvider at runtime, not plugin config.`
+        );
+      }
+    } else if (val !== null && typeof val === 'object' && !Array.isArray(val)) {
+      validateConfig(val as Record<string, unknown>, fullPath);
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Message protocol
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -87,10 +117,12 @@ export class PluginSandbox {
 
   constructor(pluginPath: string, opts: PluginSandboxOptions = {}) {
     this.pluginPath = resolve(pluginPath);
+    const config = opts.config ?? {};
+    validateConfig(config);
     this.options = {
       maxHeapMb:     opts.maxHeapMb    ?? 128,
       callTimeoutMs: opts.callTimeoutMs ?? 30_000,
-      config:        opts.config        ?? {},
+      config,
       agentId:       opts.agentId       ?? 'plugin-sandbox',
     };
   }
