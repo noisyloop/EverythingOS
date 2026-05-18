@@ -14,8 +14,10 @@
  */
 
 import { createHash } from 'crypto';
-import { createWriteStream, existsSync, readFileSync, WriteStream, writeFileSync } from 'fs';
+import { createInterface } from 'readline';
+import { createReadStream, createWriteStream, existsSync, ReadStream, readFileSync, WriteStream, writeFileSync } from 'fs';
 import { resolve } from 'path';
+import { scrubPII } from './sanitize';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -142,6 +144,21 @@ export function hashContent(content: string): string {
   return createHash('sha256').update(content).digest('hex');
 }
 
+/** Recursively scrub PII from metadata string values before they reach the audit log (STRIDE I-3). */
+function scrubMetadata(obj: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (typeof v === 'string') {
+      out[k] = scrubPII(v).scrubbed;
+    } else if (v !== null && typeof v === 'object' && !Array.isArray(v)) {
+      out[k] = scrubMetadata(v as Record<string, unknown>);
+    } else {
+      out[k] = v;
+    }
+  }
+  return out;
+}
+
 export const AuditLogger = {
   /**
    * Append an entry to the audit log.
@@ -157,7 +174,7 @@ export const AuditLogger = {
       event: input.event,
       inputHash: input.inputHash,
       outputHash: input.outputHash,
-      metadata: input.metadata,
+      metadata: input.metadata ? scrubMetadata(input.metadata) : undefined,
       previousHash: lastHash,
     };
 
@@ -198,35 +215,41 @@ export const AuditLogger = {
 
   /**
    * Verify the on-disk audit log's hash chain.
+   * Streams the file line-by-line to avoid loading the full log into memory (STRIDE D-4).
    * Always call flushAuditLog() first on a live system to ensure all writes are flushed.
    */
-  verifyChain(filePath?: string): ChainVerificationResult {
+  async verifyChain(filePath?: string): Promise<ChainVerificationResult> {
     const path = filePath ?? LOG_FILE_PATH;
 
     if (!existsSync(path)) {
       return { valid: true, totalEntries: 0 };
     }
 
-    const lines = readFileSync(path, 'utf8')
-      .split('\n')
-      .filter((l) => l.trim().length > 0);
-
     let previousHash = 'GENESIS';
+    let totalEntries = 0;
 
-    for (let i = 0; i < lines.length; i++) {
+    const rl = createInterface({
+      input: createReadStream(path, { encoding: 'utf8' }) as ReadStream,
+      crlfDelay: Infinity,
+    });
+
+    for await (const rawLine of rl) {
+      const line = rawLine.trim();
+      if (!line) continue;
+
       let entry: AuditEntry;
       try {
-        entry = JSON.parse(lines[i]) as AuditEntry;
+        entry = JSON.parse(line) as AuditEntry;
       } catch {
-        return { valid: false, totalEntries: lines.length, brokenAt: i, reason: `JSON parse error at line ${i + 1}` };
+        return { valid: false, totalEntries, brokenAt: totalEntries, reason: `JSON parse error at line ${totalEntries + 1}` };
       }
 
       if (entry.previousHash !== previousHash) {
         return {
           valid: false,
-          totalEntries: lines.length,
-          brokenAt: i,
-          reason: `Hash chain broken at entry ${i + 1} (seq: ${entry.seq}): previousHash mismatch`,
+          totalEntries,
+          brokenAt: totalEntries,
+          reason: `Hash chain broken at entry ${totalEntries + 1} (seq: ${entry.seq}): previousHash mismatch`,
         };
       }
 
@@ -235,16 +258,17 @@ export const AuditLogger = {
       if (expectedHash !== entryHash) {
         return {
           valid: false,
-          totalEntries: lines.length,
-          brokenAt: i,
-          reason: `Entry hash mismatch at entry ${i + 1} (seq: ${entry.seq}): content was modified`,
+          totalEntries,
+          brokenAt: totalEntries,
+          reason: `Entry hash mismatch at entry ${totalEntries + 1} (seq: ${entry.seq}): content was modified`,
         };
       }
 
       previousHash = entryHash;
+      totalEntries++;
     }
 
-    return { valid: true, totalEntries: lines.length };
+    return { valid: true, totalEntries };
   },
 
   stats(): {
@@ -272,8 +296,12 @@ export const AuditLogger = {
    * Resume the hash chain from the last persisted entry.
    * Verifies chain integrity at startup — logs CRITICAL alert if tampered.
    * Call once at startup before any agents start.
+   *
+   * The sync part (state replay from last entry) runs immediately.
+   * The async part (full chain verification) resolves when complete — await
+   * the returned Promise if you need to confirm integrity before proceeding.
    */
-  initialize(): void {
+  async initialize(): Promise<void> {
     // Close any open stream so subsequent writes go to the (re)created file,
     // not a stale file descriptor pointing to a deleted inode.
     if (logStream && !logStream.destroyed) {
@@ -288,6 +316,7 @@ export const AuditLogger = {
       return;
     }
 
+    // Replay state from the last line synchronously so log() works immediately
     const content = readFileSync(LOG_FILE_PATH, 'utf8');
     const lines = content.split('\n').filter((l) => l.trim().length > 0);
 
@@ -295,17 +324,6 @@ export const AuditLogger = {
       lastHash = 'GENESIS';
       sequenceCounter = 0;
       return;
-    }
-
-    // Verify the full chain before resuming — detect truncation or replacement
-    const verifyResult = AuditLogger.verifyChain(LOG_FILE_PATH);
-    if (!verifyResult.valid) {
-      console.error(
-        `[AuditLogger] CRITICAL: Audit log chain integrity check FAILED. ` +
-        `Reason: ${verifyResult.reason}. The log may have been tampered with. ` +
-        `Review ${LOG_FILE_PATH} before proceeding.`
-      );
-      // Still resume from last parseable entry — do not silently truncate history
     }
 
     try {
@@ -317,7 +335,19 @@ export const AuditLogger = {
       lastHash = 'GENESIS';
       sequenceCounter = 0;
     }
+
+    // Full chain verification — streaming, non-blocking (STRIDE D-4)
+    const verifyResult = await AuditLogger.verifyChain(LOG_FILE_PATH);
+    if (!verifyResult.valid) {
+      console.error(
+        `[AuditLogger] CRITICAL: Audit log chain integrity check FAILED. ` +
+        `Reason: ${verifyResult.reason}. The log may have been tampered with. ` +
+        `Review ${LOG_FILE_PATH} before proceeding.`
+      );
+    }
   },
 };
 
-AuditLogger.initialize();
+AuditLogger.initialize().catch((err) => {
+  console.error('[AuditLogger] Initialization error:', err);
+});
