@@ -7,3 +7,9 @@ dist/
 *.local
 coverage/
 .nyc_output/
+
+# Runtime-generated audit and decision logs
+everythingos-audit.jsonl
+everythingos-decisions.jsonl
+agent-revocations.jsonl
+model-guard/violations.jsonl
