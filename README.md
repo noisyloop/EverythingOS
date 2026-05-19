@@ -17,6 +17,8 @@ EverythingOS was built to ask those questions first — and answer them structur
 
 EverythingOS is a TypeScript multi-agent framework for autonomous systems where **security, auditability, and containment** are non-negotiable. It is not a toy or a research prototype. It is the infrastructure layer for agents that make real decisions with real consequences.
 
+It also ships a kernel-level defense most agent frameworks don't have: the [**Glasswally integration**](#glasswally-integration--kernel-level-distillation-attack-detection) detects model-distillation/extraction campaigns via eBPF and routes pre-classified enforcement decisions into the agent SOC stack — see the section below.
+
 ---
 
 ## Architecture
@@ -272,15 +274,15 @@ These are real gaps. If you have ideas, open a discussion or a PR.
 ## Quick Start
 
 ```bash
-git clone https://github.com/noisyloop/everythingos
-cd everythingos
+git clone https://github.com/noisyloop/EverythingOS
+cd EverythingOS
 npm ci          # use ci, not install — lockfile is law
 
-cp .env.example .env
-# Set EOS_AGENT_SECRET (required in production):
-#   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+# Create .env and set EOS_AGENT_SECRET (required in production):
+echo "EOS_AGENT_SECRET=$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")" > .env
 
-npm test        # run the full test suite
+npm test        # run the full test suite (126 tests)
+npm run e2e:proof  # prove the full stack works end-to-end, no mocks
 npm run dev     # start with hot reload
 ```
 
@@ -296,6 +298,38 @@ npm run dev     # start with hot reload
 | `MODEL_GUARD_DIR` | No | Directory for fingerprints and violations. Default: `./model-guard/` |
 | `GLASSWALLY_OUTPUT_DIR` | If using Glasswally | Absolute path to Glasswally's `--output` directory. Required when running `GlasswallyAgent`. |
 | `GLASSWALLY_IOC_SECRET` | If using Glasswally | HMAC-SHA256 secret for IOC bundle verification. Must match the secret configured in Glasswally. Without this, IOC bundles are logged but not forwarded to `ThreatIntelAgent`. |
+
+---
+
+## Build your first agent
+
+Scaffold a new agent from the secure template — no source-reading required:
+
+```bash
+npx everythingos new my-agent
+# or, equivalently:
+npx eos new my-agent
+```
+
+It prompts for a **risk tier** (LOW / MEDIUM / HIGH) and a **description**, then writes `src/agents/my-agent/index.ts` from `src/agents/_scaffold` — with a Zod-validated manifest and **explicit per-channel publish/subscribe allowlists** (no wildcards). A generated agent goes through the exact same security pipeline as a built-in one; nothing is bypassed. (HIGH-tier agents require a registered `ApprovalGateAgent` before they will start — by design.)
+
+Register and run it (same pattern as [`examples/demo-simple.ts`](examples/demo-simple.ts)):
+
+```ts
+import MyAgentAgent from './src/agents/my-agent';
+import { agentRegistry } from './src';
+
+agentRegistry.register(new MyAgentAgent());
+await agentRegistry.start('my-agent');
+```
+
+Want proof the whole stack works as a system before you build on it? Run the end-to-end example — it registers a custom MEDIUM-tier agent, runs untrusted input through the injection-sanitization pipeline, performs an observable side effect, emits over the EventBus, and independently verifies the tamper-evident decision-ledger entry. **No mocks** — if any layer is broken it names it and exits non-zero:
+
+```bash
+npm run e2e:proof
+```
+
+See [`examples/e2e-proof.ts`](examples/e2e-proof.ts).
 
 ---
 
