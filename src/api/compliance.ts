@@ -15,7 +15,7 @@
  *   app.get('/api/compliance/audit/verify', auditVerifyHandler);
  */
 
-import { AgentRegistry } from '../core/AgentRegistry';
+import { agentRegistry } from '../core/registry/AgentRegistry';
 import { AuditLogger } from '../security/audit-log';
 import { AgentRiskTier } from '../types/agent-risk';
 
@@ -27,7 +27,7 @@ export async function complianceStatusHandler(
   _req: unknown,
   res: { json: (data: unknown) => void; status: (code: number) => { json: (data: unknown) => void } }
 ): Promise<void> {
-  const status = AgentRegistry.complianceStatus();
+  const status = agentRegistry.complianceStatus();
   const auditVerification = await AuditLogger.verifyChain();
 
   const highRiskWithoutApprovalGate =
@@ -121,7 +121,7 @@ export async function emergencyStopHandler(
   res: { json: (data: unknown) => void }
 ): Promise<void> {
   const triggeredBy = req.body?.triggeredBy ?? 'api_request';
-  await AgentRegistry.emergencyStop(triggeredBy);
+  await agentRegistry.emergencyStop(triggeredBy);
   res.json({ success: true, message: 'Emergency stop executed. All agents halted.', triggeredBy });
 }
 

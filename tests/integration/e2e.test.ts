@@ -11,7 +11,7 @@ import { DecisionLedger } from '../../src/security/decision-ledger';
 import { QuarantineManager, QuarantineSeverity } from '../../src/security/quarantine';
 import { ModelGuard } from '../../src/security/model-guard';
 import { CredentialVault } from '../../src/security/credential-vault';
-import { AgentRegistry } from '../../src/core/AgentRegistry';
+import { agentRegistry as AgentRegistry } from '../../src/core/registry/AgentRegistry';
 import { Agent } from '../../src/runtime/Agent';
 import { AgentRiskTier } from '../../src/types/agent-risk';
 import { sanitizeInput } from '../../src/security/sanitize';

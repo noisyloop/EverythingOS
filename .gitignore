@@ -13,3 +13,6 @@ everythingos-audit.jsonl
 everythingos-decisions.jsonl
 agent-revocations.jsonl
 model-guard/violations.jsonl
+
+# e2e proof-of-life artifacts
+.e2e-proof/

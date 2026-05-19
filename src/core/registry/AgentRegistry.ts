@@ -8,6 +8,8 @@ import { existsSync } from 'fs';
 import { join, resolve } from 'path';
 import { eventBus } from '../event-bus/EventBus';
 import { AuditLogger } from '../../security/audit-log';
+import { AgentRiskTier } from '../../types/agent-risk';
+import { AgentAuthManager } from '../../security/agent-auth';
 import type { Agent, AgentConfig, AgentStatus, HealthStatus } from '../../runtime/Agent';
 import { AgentManifest, validateManifest, AgentCapability, AgentCategory } from '../../types/agent-manifest';
 
@@ -23,6 +25,7 @@ interface AgentRecord {
 
 export class AgentRegistry {
   private records: Map<string, AgentRecord> = new Map();
+  private approvalGateRegistered = false;
 
   // ─────────────────────────────────────────────────────────────────────────────
   // Registration
@@ -30,8 +33,29 @@ export class AgentRegistry {
 
   register(agent: Agent, manifest?: AgentManifest): void {
     if (this.records.has(agent.id)) {
-      throw new Error(`[AgentRegistry] Agent already registered: ${agent.id}`);
+      // STRIDE E-5: agent identity is the trust anchor (e.g. ApprovalGate's
+      // trustedAgents). Silently overwriting would let a malicious agent
+      // seize a trusted agent's id. Reject the collision and record it as a
+      // security event instead of overwriting.
+      AuditLogger.log({
+        agentId: agent.id,
+        event: 'safety.violation',
+        metadata: {
+          action: 'agent_id_collision_rejected',
+          name: agent.name,
+          type: agent.type,
+        },
+      });
+      throw new Error(
+        `[AgentRegistry] Agent id "${agent.id}" is already registered. ` +
+        `Refusing to overwrite — unregister the existing agent first if this is intentional.`,
+      );
     }
+
+    if (agent.name === 'ApprovalGateAgent' || agent.id === 'approval-gate') {
+      this.approvalGateRegistered = true;
+    }
+
     this.records.set(agent.id, { agent, manifest });
     eventBus.emit('agent:registered', {
       agentId: agent.id,
@@ -45,6 +69,7 @@ export class AgentRegistry {
         category: manifest?.category,
         capabilities: manifest?.capabilities,
         trustLevel: manifest?.trustLevel,
+        tier: agent.getRiskTier(),
       },
     });
   }
@@ -57,6 +82,11 @@ export class AgentRegistry {
       record.agent.stop();
     }
     this.records.delete(agentId);
+
+    if (record.agent.name === 'ApprovalGateAgent' || agentId === 'approval-gate') {
+      this.approvalGateRegistered = false;
+    }
+
     eventBus.emit('agent:unregistered', { agentId });
     return true;
   }
@@ -240,6 +270,7 @@ export class AgentRegistry {
   async startAgent(agentId: string): Promise<void> {
     const agent = this.records.get(agentId)?.agent;
     if (!agent) throw new Error(`[AgentRegistry] Agent not found: ${agentId}`);
+    this.preflightCheck(agent);
     await agent._internalStart();
   }
 
@@ -256,6 +287,126 @@ export class AgentRegistry {
   async stopAll(): Promise<void> {
     const running = this.getAll().filter((a) => a.getStatus() === 'running');
     await Promise.all(running.map((a) => a.stop()));
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Compliance + hardened lifecycle (STRIDE E-5 / E-1, NIST AI RMF MANAGE)
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  /** Alias of startAgent — runs the compliance pre-flight. */
+  async start(agentId: string): Promise<void> {
+    return this.startAgent(agentId);
+  }
+
+  /** Alias of stopAgent. */
+  async stop(agentId: string): Promise<void> {
+    return this.stopAgent(agentId);
+  }
+
+  async registerAndStart(agent: Agent, manifest?: AgentManifest): Promise<void> {
+    this.register(agent, manifest);
+    await this.startAgent(agent.id);
+  }
+
+  /**
+   * Compliance pre-flight. Throws (blocks start) when:
+   *   - a HIGH-tier agent has no registered ApprovalGateAgent, or no
+   *     documented riskJustification (NIST AI RMF — human-in-the-loop)
+   *   - a MEDIUM+ LLM agent has not declared genAIRisks (NIST AI 600-1)
+   * Runs on every start path, including the runtime server path.
+   */
+  private preflightCheck(agent: Agent): void {
+    const tier = agent.getRiskTier();
+    const cfg = agent.getConfig();
+
+    if (tier === AgentRiskTier.HIGH) {
+      if (!this.approvalGateRegistered) {
+        throw new Error(
+          `[AgentRegistry] COMPLIANCE BLOCK: Agent "${agent.name}" is HIGH risk tier but ` +
+          `ApprovalGateAgent is not registered. NIST AI RMF requires human-in-the-loop ` +
+          `for HIGH risk tier agents.`,
+        );
+      }
+      if (!cfg?.riskConfig?.riskJustification?.trim()) {
+        throw new Error(
+          `[AgentRegistry] COMPLIANCE BLOCK: HIGH risk agent "${agent.name}" must have ` +
+          `riskJustification documented in riskConfig.`,
+        );
+      }
+    }
+
+    if (tier !== AgentRiskTier.LOW && cfg?.llm && !cfg?.riskConfig?.genAIRisks) {
+      throw new Error(
+        `[AgentRegistry] COMPLIANCE BLOCK: Agent "${agent.name}" uses an LLM but has no ` +
+        `genAIRisks declared in riskConfig. NIST AI 600-1 requires GenAI risk flags.`,
+      );
+    }
+  }
+
+  /**
+   * EMERGENCY STOP — halts ALL agents and revokes ALL tokens immediately.
+   * NIST AI RMF MANAGE function.
+   */
+  async emergencyStop(triggeredBy = 'manual'): Promise<void> {
+    console.error(`[AgentRegistry] ⚠️  EMERGENCY STOP triggered by: ${triggeredBy}`);
+    AuditLogger.log({
+      agentId: 'system',
+      event: 'safety.emergency_stop',
+      metadata: { triggeredBy, agentCount: this.records.size },
+    });
+
+    const stops = this.getAll().map(async (agent) => {
+      try {
+        await agent._internalStop();
+        AgentAuthManager.revokeToken(agent.id, `emergency_stop:${triggeredBy}`);
+      } catch (err) {
+        AuditLogger.log({
+          agentId: agent.id,
+          event: 'agent.error',
+          metadata: { phase: 'emergency_stop', error: String(err) },
+        });
+      }
+    });
+    await Promise.allSettled(stops);
+    this.approvalGateRegistered = false;
+  }
+
+  /** Lightweight roster — used by compliance reporting and integration tests. */
+  list(): Array<{ id: string; name: string; type: string; tier: AgentRiskTier; running: boolean }> {
+    return this.getAll().map((a) => ({
+      id: a.id,
+      name: a.name,
+      type: a.type,
+      tier: a.getRiskTier(),
+      running: a.isRunning(),
+    }));
+  }
+
+  /** Compliance posture snapshot — backs GET /api/compliance/status. */
+  complianceStatus(): {
+    totalAgents: number;
+    runningAgents: number;
+    approvalGateActive: boolean;
+    tierBreakdown: Record<AgentRiskTier, number>;
+    auditStats: ReturnType<typeof AuditLogger.stats>;
+    tokenStatus: ReturnType<typeof AgentAuthManager.listTokens>;
+  } {
+    const agents = this.getAll();
+    const tierBreakdown: Record<AgentRiskTier, number> = {
+      [AgentRiskTier.LOW]: 0,
+      [AgentRiskTier.MEDIUM]: 0,
+      [AgentRiskTier.HIGH]: 0,
+    };
+    for (const a of agents) tierBreakdown[a.getRiskTier()]++;
+
+    return {
+      totalAgents: agents.length,
+      runningAgents: agents.filter((a) => a.isRunning()).length,
+      approvalGateActive: this.approvalGateRegistered,
+      tierBreakdown,
+      auditStats: AuditLogger.stats(),
+      tokenStatus: AgentAuthManager.listTokens(),
+    };
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
