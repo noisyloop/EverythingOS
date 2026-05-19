@@ -17,6 +17,7 @@
     "start": "node dist/index.js",
     "api": "node dist/api/server.js",
     "dev": "tsx watch src/index.ts",
+    "e2e:proof": "tsx examples/e2e-proof.ts",
     "test": "node -e \"['./everythingos-audit.jsonl','./agent-revocations.jsonl','./everythingos-decisions.jsonl'].forEach(f=>{try{require('fs').unlinkSync(f)}catch{}})\" && jest",
     "test:security": "jest tests/security/ --verbose --forceExit",
     "audit:check": "npm audit --audit-level=high",
