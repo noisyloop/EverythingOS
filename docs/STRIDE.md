@@ -1,7 +1,7 @@
 # STRIDE Threat Model — EverythingOS
 
-**Status:** Phases 1–4 complete — May 2026  
-**Scope:** EverythingOS runtime as of the `claude/improve-security-agentic-system-6Nep8` branch  
+**Status:** Phases 1–4 complete — updated 2026-05-19  
+**Scope:** EverythingOS runtime on `main` (2026-05-19)  
 **Analyst:** Claude Code (automated analysis + manual review)  
 **Framework:** STRIDE (Spoofing, Tampering, Repudiation, Information Disclosure, Denial of Service, Elevation of Privilege)
 
@@ -20,7 +20,7 @@
 | ID | Category | Severity | Status | Component | One-line description |
 |---|---|---|---|---|---|
 | S-1 | Spoofing | HIGH | ⚠️ Ph1 | `agent-auth.ts` | Per-call signing blocks *external* replay; in-process registry theft still unaddressed (audit: not in any phase) |
-| S-2 | Spoofing | CRITICAL | ✅ Ph1 | `ApprovalGateAgent.ts` | Fixed: no EventBus approval intake, HMAC `submitDecision()`. Residual: `server.ts` still exposes unauthenticated `/api/approvals/:id/{approve,deny}` emitting an *unconsumed* `approval:decision` (dead code / re-introduction footgun) |
+| S-2 | Spoofing | CRITICAL | ✅ Ph1 + 2026-05-19 | `ApprovalGateAgent.ts` | Fixed: no EventBus approval intake, HMAC `submitDecision()`. Residual now resolved (commit `54628dd`): the unauthenticated `server.ts` `/api/approvals/:id/{approve,deny}` endpoints were removed — the route returns `410 Gone` and emits no `approval:decision`. No re-introduction footgun remains |
 | S-3 | Spoofing | MEDIUM | ⚠️ Ph1 | `model-guard.ts` | No caller authentication on `approve()`; only the post-startup `modelsLocked` lock + free-form `approvedBy`. "Caller gate" overstated |
 | S-4 | Spoofing | MEDIUM | ✅ Ph2 | `PolicyEngine.ts` | `supervisor.addPolicy()` is callable by any in-process code |
 | T-1 | Tampering | MEDIUM | ✅ Ph2 | `audit-log.ts` | Log file truncation/replacement undetected at startup |
@@ -143,6 +143,8 @@ private processDecision(decision: ApprovalDecision): void {
 **Impact:** The entire approval gate control is defeatable by any in-process agent. HIGH-tier actions (trade execution, deployment, robotics) can be self-approved.
 
 **Recommendation:** The approval gate must not accept decisions from the EventBus. Human approvals must arrive through an out-of-band authenticated channel (signed webhook with pre-shared key, CLI command over stdin, or a dedicated approval service). The `approval:decision` EventBus channel should be removed or restricted to a hardcoded system identity that cannot be impersonated by agent code.
+
+**Resolution (2026-05-19, commit `54628dd`):** ✅ Resolved. Approval intake is off the EventBus (authenticated out-of-band `submitDecision()`), and the previously-residual unauthenticated `server.ts` `/api/approvals/:id/{approve,deny}` endpoints were removed — the route now returns `410 Gone` and emits no `approval:decision`. No dead-code re-introduction footgun remains.
 
 ---
 
@@ -602,7 +604,7 @@ The following controls are implemented and working. This section provides contex
 > - **T-2** (Phase 3 "key separate from EOS_AGENT_SECRET") — ⚠️ falls back to `EOS_AGENT_SECRET` unless explicitly configured.
 > - **T-5** (Phase 1 "plugin return value sanitization") — was a gap; **now genuinely fixed 2026-05-18.**
 > - **E-5** (Phase 1 "registry prevents ID collisions") — was a gap; **now genuinely fixed 2026-05-18.**
-> - **S-2/E-1** — core fix real; residual unauthenticated `server.ts` approval endpoints emit an unconsumed event (dead-code footgun).
+> - **S-2/E-1** — core fix real; the residual unauthenticated `server.ts` approval endpoints were **removed in commit `54628dd`** (route now returns `410 Gone`, no `approval:decision` emission). E-1's formal proof remains research-grade (Phase 5).
 
 ### ✅ Phase 1 — Critical Baseline (complete)
 
