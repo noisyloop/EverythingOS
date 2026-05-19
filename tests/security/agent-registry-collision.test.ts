@@ -13,7 +13,7 @@
  * unregister still works.
  */
 
-import { AgentRegistry } from '../../src/core/AgentRegistry';
+import { agentRegistry as AgentRegistry } from '../../src/core/registry/AgentRegistry';
 import { Agent } from '../../src/runtime/Agent';
 import { AgentRiskTier } from '../../src/types/agent-risk';
 import { AuditLogger } from '../../src/security/audit-log';

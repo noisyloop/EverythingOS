@@ -47,7 +47,7 @@
 | E-2 | EoP | CRITICAL | ❌ | Architecture | NOT IMPLEMENTED: `IsolatedAgentRunner` (worker_threads) exists but has zero callers. `AgentRegistry.start()` → `agent._internalStart()` runs every agent in-process. The architecture diagram below ("single V8 heap — all agents share this boundary") is the real state |
 | E-3 | EoP | HIGH | ✅ Ph4 | `SupervisorAgent.ts` | `policyEngine.lock()` called in `start()`; runtime injection rejected |
 | E-4 | EoP | HIGH | ✅ Ph4 | `model-guard.ts` | `lockModels()` wired via `finalizeStartup()`; allowlist frozen at startup |
-| E-5 | EoP | MEDIUM | ✅ 2026-05-18 | `core/AgentRegistry.ts` | Was a gap (`register()` silently unregistered+overwrote a duplicate id). NOW FIXED: collision is rejected with a thrown error + `safety.violation` audit event |
+| E-5 | EoP | MEDIUM | ✅ 2026-05-18 | `core/registry/AgentRegistry.ts` | Was a gap (`register()` silently unregistered+overwrote a duplicate id), and the audited fix lived in an unwired twin. NOW FIXED in the runtime registry: collision is rejected with a thrown error + `safety.violation` audit event; HIGH-tier preflight runs on the real start path |
 
 ---
 
