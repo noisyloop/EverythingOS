@@ -4,6 +4,10 @@
   "description": "LLM-Agnostic Multi-Agent Operating System — Robots For Peace",
   "main": "dist/index.js",
   "type": "module",
+  "bin": {
+    "everythingos": "cli/bin.js",
+    "eos": "cli/bin.js"
+  },
   "engines": {
     "node": ">=20.20.0",
     "npm": ">=10.0.0"
