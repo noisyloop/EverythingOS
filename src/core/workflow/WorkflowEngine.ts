@@ -144,14 +144,26 @@ export class WorkflowEngine {
     context: NodeContext,
     timeout?: number
   ): Promise<NodeResult> {
-    if (!timeout) {
+    // Normalize and bound the timeout to prevent resource exhaustion from untrusted values
+    const MAX_NODE_TIMEOUT_MS = 60_000; // 60 seconds hard limit for node timeouts
+    const numericTimeout = typeof timeout === 'number' ? timeout : Number(timeout);
+    const safeTimeout =
+      Number.isFinite(numericTimeout) && numericTimeout > 0
+        ? Math.min(Math.floor(numericTimeout), MAX_NODE_TIMEOUT_MS)
+        : 0;
+
+    // If there is no effective timeout, run the handler directly
+    if (!safeTimeout) {
       return handler(node, context);
     }
 
     return Promise.race([
       handler(node, context),
       new Promise<NodeResult>((_, reject) =>
-        setTimeout(() => reject(new Error(`Node timeout: ${timeout}ms`)), timeout)
+        setTimeout(
+          () => reject(new Error(`Node timeout: ${safeTimeout}ms`)),
+          safeTimeout
+        )
       ),
     ]);
   }
