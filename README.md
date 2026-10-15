@@ -176,6 +176,14 @@ Trust boundaries **TB-1 … TB-9** (Agent↔EventBus, EventBus↔Pipeline, Agent
 
 A PR cannot merge unless these pass (`.github/workflows/security.yml`): TypeScript type check; full security test suite; SSRF regression (http-guard enforcement); audit-chain integrity verification; the **STRIDE claim/evidence gate** (every ✅ in the threat model must be test-backed or audit-attested — the doc and code cannot silently diverge); `npm audit` at high/critical; Gitleaks secret scan; Node version gate; CodeQL/static analysis. SBOM generation runs on main. This is the mechanism that keeps "security-first" from rotting into a slogan.
 
+## Dependency posture
+
+The runtime dependency surface is deliberately small: `axios` (only via `http-guard`), `express`, `ws`, `re2`, `zod`, `dotenv`, `uuid`. As of the October 2026 dependency sweep, `npm audit --omit=dev` reports **0 vulnerabilities**; floors in `package.json` are raised so a fresh `npm install` cannot resolve a known-vulnerable version (`axios ≥1.20.0`, `ws ≥8.22.0`, `re2 ≥1.27.0`, `express ≥4.22.3`). Dev tooling is on Jest 30 and `@cyclonedx/cyclonedx-npm` 6.
+
+**Known residual:** a moderate, dev-only `sprintf-js` advisory with no patched release, reached through Jest's coverage instrumentation. It never ships in the runtime and does not trip the high/critical `audit:check` gate.
+
+**Not affected** by the October 14, 2026 Next.js / React Server Components / `sharp` (librsvg) advisories: the project depends on none of `next`, `sharp`, or `react-server-dom-*`, and does no SVG or image processing.
+
 ## Implemented controls (where the code lives)
 
 Each is a real, wired control. File paths are load-bearing.
